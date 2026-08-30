@@ -1,0 +1,57 @@
+{
+  "name": "vantage-archive",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "dev": "tsx scripts/dev.ts",
+    "build": "prisma generate && next build",
+    "start": "start \"Next.js\" /b cmd /c \"npm run next:start\" && npm run worker",
+    "next:start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "db:seed": "tsx prisma/seed.ts",
+    "db:indexes": "psql \"$DATABASE_URL\" -f prisma/sql/001_search_indexes.sql",
+    "worker": "tsx --conditions=react-server scripts/worker.ts",
+    "worker:once": "tsx --conditions=react-server scripts/worker-once.ts",
+    "check:ffmpeg": "tsx scripts/check-ffmpeg.ts",
+    "cleanup": "tsx scripts/cleanup.ts",
+    "doctor": "tsx scripts/doctor.ts",
+    "next:dev": "next dev",
+    "dev:reset": "tsx scripts/reset-dev.ts && npm run dev"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1117.0",
+    "@aws-sdk/s3-request-presigner": "^3.1117.0",
+    "@prisma/client": "^6.14.0",
+    "bcryptjs": "^3.0.2",
+    "clsx": "^2.1.1",
+    "hls.js": "^1.7.1",
+    "lucide-react": "^0.541.0",
+    "next": "^15.5.24",
+    "next-auth": "^5.0.0-beta.29",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "server-only": "^0.0.1",
+    "tailwind-merge": "^3.3.1",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.12",
+    "@types/node": "^22.20.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "^19.1.0",
+    "eslint": "^9.33.0",
+    "eslint-config-next": "^15.5.0",
+    "prisma": "^6.14.0",
+    "tailwindcss": "^4.1.12",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.2"
+  }
+}

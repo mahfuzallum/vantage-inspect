@@ -1,0 +1,586 @@
+// Vantage Archive — relational schema
+// Conventions:
+//  - cuid() primary keys, snake_cased tables/columns via @map
+//  - every public-facing entity carries a unique slug
+//  - denormalised counters (viewCount, favoriteCount, contentCount) keep
+//    listing queries index-only; they are maintained in the service layer.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ---------------------------------------------------------------- enums
+
+enum UserRole {
+  USER
+  MODERATOR
+  ADMIN
+}
+
+/// Technical state of the media pipeline.
+///
+/// Deliberately separate from ContentStatus: publication and processing are
+/// orthogonal. A recording can be fully transcoded but still unpublished, or
+/// published-and-scheduled while its source is still encoding. Folding the two
+/// into one enum would also break every existing `status: PUBLISHED` query.
+enum ProcessingStatus {
+  NONE
+  UPLOADING
+  QUEUED
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  CANCELLED
+}
+
+enum ContentStatus {
+  DRAFT
+  SCHEDULED
+  PUBLISHED
+  ARCHIVED
+}
+
+enum MediaKind {
+  VIDEO
+  AUDIO
+  IMAGE
+  DOCUMENT
+}
+
+enum StorageProvider {
+  LOCAL
+  S3
+  EXTERNAL
+}
+
+enum ReportReason {
+  BROKEN_MEDIA
+  INCORRECT_METADATA
+  COPYRIGHT
+  SPAM
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  DISMISSED
+}
+
+enum ReportTargetType {
+  CONTENT
+  CREATOR
+  COMMENT
+}
+
+// ---------------------------------------------------------------- identity
+
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  emailVerifiedAt DateTime? @map("email_verified_at")
+  passwordHash    String?   @map("password_hash")
+  username        String    @unique
+  displayName     String    @map("display_name")
+  bio             String?
+  avatarUrl       String?   @map("avatar_url")
+  role            UserRole  @default(USER)
+  isActive        Boolean   @default(true) @map("is_active")
+  lastLoginAt     DateTime? @map("last_login_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  accounts       Account[]
+  sessions       Session[]
+  preference     UserPreference?
+  favorites      Favorite[]
+  history        ViewingHistory[]
+  views          View[]
+  resetTokens    PasswordResetToken[]
+  emailChanges   EmailChangeToken[]
+  reportsFiled   Report[]             @relation("ReportAuthor")
+  reportsHandled Report[]             @relation("ReportHandler")
+  uploads        MediaAsset[]         @relation("MediaUploader")
+  auditLogs      AuditLog[]
+
+  @@index([role, isActive])
+  @@index([createdAt])
+  @@map("users")
+}
+
+/// Auth.js OAuth account link. Present so social providers can be added
+/// later without a schema migration.
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+/// Persisted device sessions. JWT is the active strategy, but keeping this
+/// table lets the app switch to database sessions or show "signed-in devices".
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+  userAgent    String?  @map("user_agent")
+  ipHash       String?  @map("ip_hash")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expires])
+  @@map("sessions")
+}
+
+/// Only the SHA-256 hash of a reset token is stored; the raw token exists
+/// solely inside the emailed link.
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("password_reset_tokens")
+}
+
+/// Pending email change. Like password resets, only the token hash is stored.
+/// The address is held here — not written to the user row — until the new
+/// address is confirmed, so a typo or a hijacked session cannot lock someone
+/// out of their own account.
+model EmailChangeToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  newEmail  String    @map("new_email")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("email_change_tokens")
+}
+
+model UserPreference {
+  userId             String   @id @map("user_id")
+  autoplay           Boolean  @default(false)
+  keepHistory        Boolean  @default(true) @map("keep_history")
+  itemsPerPage       Int      @default(24) @map("items_per_page")
+  preferredLocale    String   @default("en") @map("preferred_locale")
+  emailNotifications Boolean  @default(true) @map("email_notifications")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_preferences")
+}
+
+// ---------------------------------------------------------------- media
+
+/// Storage-agnostic pointer to a file. `provider` + `objectKey` identify the
+/// object; `url` is only populated for EXTERNAL sources. Resolution happens
+/// in lib/media, never inside a component.
+model MediaAsset {
+  id              String          @id @default(cuid())
+  kind            MediaKind
+  provider        StorageProvider @default(LOCAL)
+  bucket          String?
+  objectKey       String?         @map("object_key")
+  url             String?
+  mimeType        String?         @map("mime_type")
+  sizeBytes       Int?            @map("size_bytes")
+  width           Int?
+  height          Int?
+  durationSeconds Int?            @map("duration_seconds")
+  checksum        String?
+  /// As supplied by the uploader, kept for display only. Never used to build
+  /// a storage key — keys come from ids the application generates.
+  originalName    String?         @map("original_name")
+  /// Private objects are served through short-lived signed URLs; public ones
+  /// go straight to the CDN.
+  isPublic        Boolean         @default(true) @map("is_public")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  /// All three are read from ffprobe, never from the uploading client.
+  container       String?
+  videoCodec      String?         @map("video_codec")
+  audioCodec      String?         @map("audio_codec")
+  bitrate         Int?
+  altText         String?         @map("alt_text")
+  uploadedById    String?         @map("uploaded_by_id")
+  createdAt       DateTime        @default(now()) @map("created_at")
+
+  uploadedBy     User?     @relation("MediaUploader", fields: [uploadedById], references: [id], onDelete: SetNull)
+  thumbnailFor   Content[] @relation("ContentThumbnail")
+  sourceFor      Content[] @relation("ContentSource")
+  creatorAvatars Creator[] @relation("CreatorAvatar")
+  creatorBanners Creator[] @relation("CreatorBanner")
+
+  @@unique([provider, bucket, objectKey])
+  @@index([kind, createdAt])
+  @@map("media_assets")
+}
+
+// ---------------------------------------------------------------- taxonomy
+
+model Category {
+  id             String   @id @default(cuid())
+  slug           String   @unique
+  name           String
+  description    String?
+  iconKey        String?  @map("icon_key")
+  accentHex      String?  @map("accent_hex")
+  parentId       String?  @map("parent_id")
+  position       Int      @default(0)
+  isActive       Boolean  @default(true) @map("is_active")
+  contentCount   Int      @default(0) @map("content_count")
+  seoTitle       String?  @map("seo_title")
+  seoDescription String?  @map("seo_description")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  parent   Category?  @relation("CategoryTree", fields: [parentId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryTree")
+  content  Content[]
+
+  @@index([parentId, position])
+  @@index([isActive, position])
+  @@map("categories")
+}
+
+model Tag {
+  id           String   @id @default(cuid())
+  slug         String   @unique
+  name         String
+  description  String?
+  contentCount Int      @default(0) @map("content_count")
+  createdAt    DateTime @default(now()) @map("created_at")
+  updatedAt    DateTime @updatedAt @map("updated_at")
+
+  content ContentTag[]
+
+  @@index([contentCount(sort: Desc)])
+  @@map("tags")
+}
+
+model Creator {
+  id             String   @id @default(cuid())
+  slug           String   @unique
+  name           String
+  bio            String?
+  /// Long-form profile text. `bio` stays the one-line summary used on cards.
+  about          String?  @db.Text
+  websiteUrl     String?  @map("website_url")
+  /// Platform handles as { platform: url }. A column per platform would mean a
+  /// migration every time a new one matters; this does not.
+  socialLinks    Json?    @map("social_links")
+  /// When the contributor actually started, which is rarely when the record was
+  /// created here. Set by an administrator; `createdAt` is not a substitute.
+  startedAt      DateTime? @map("started_at")
+  avatarId       String?  @map("avatar_id")
+  bannerId       String?  @map("banner_id")
+  isVerified     Boolean  @default(false) @map("is_verified")
+  isActive       Boolean  @default(true) @map("is_active")
+  contentCount   Int      @default(0) @map("content_count")
+  totalViews     Int      @default(0) @map("total_views")
+  seoTitle       String?  @map("seo_title")
+  seoDescription String?  @map("seo_description")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  avatar  MediaAsset? @relation("CreatorAvatar", fields: [avatarId], references: [id], onDelete: SetNull)
+  banner  MediaAsset? @relation("CreatorBanner", fields: [bannerId], references: [id], onDelete: SetNull)
+  content Content[]
+
+  @@index([isActive, totalViews(sort: Desc)])
+  @@index([name])
+  @@map("creators")
+}
+
+// ---------------------------------------------------------------- content
+
+model Content {
+  id              String        @id @default(cuid())
+  slug            String        @unique
+  title           String
+  summary         String?
+  description     String?       @db.Text
+  kind            MediaKind     @default(VIDEO)
+  status          ContentStatus @default(DRAFT)
+  isFeatured      Boolean       @default(false) @map("is_featured")
+  durationSeconds Int?          @map("duration_seconds")
+  language        String?
+  recordedAt      DateTime?     @map("recorded_at")
+  publishedAt     DateTime?     @map("published_at")
+  viewCount       Int           @default(0) @map("view_count")
+  /// Bookmarks. Kept as a counter alongside the Favorite rows so listing
+  /// queries stay index-only rather than counting a join on every card.
+  favoriteCount   Int           @default(0) @map("favorite_count")
+  /// Up and down votes. The card shows the percentage derived from these;
+  /// storing the raw counts means the ratio can be recomputed if the display
+  /// rule ever changes.
+  likeCount       Int           @default(0) @map("like_count")
+  dislikeCount    Int           @default(0) @map("dislike_count")
+
+  thumbnailId String? @map("thumbnail_id")
+  sourceId    String? @map("source_id")
+  /// Set when the media lives on a third-party host instead of our storage.
+  externalUrl String? @map("external_url")
+
+  creatorId  String? @map("creator_id")
+  categoryId String? @map("category_id")
+
+  seoTitle       String? @map("seo_title")
+  seoDescription String? @map("seo_description")
+  ogImageUrl     String? @map("og_image_url")
+
+  // ---- media pipeline ----
+  processingStatus      ProcessingStatus @default(NONE) @map("processing_status")
+  /// Administrator-facing summary only. Raw FFmpeg output is never stored here.
+  processingError       String?          @map("processing_error")
+  processingAttempts    Int              @default(0) @map("processing_attempts")
+  processingStartedAt   DateTime?        @map("processing_started_at")
+  processingCompletedAt DateTime?        @map("processing_completed_at")
+  /// Object key of the HLS master playlist, resolved to a CDN URL at read time.
+  hlsMasterKey          String?          @map("hls_master_key")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  thumbnail MediaAsset? @relation("ContentThumbnail", fields: [thumbnailId], references: [id], onDelete: SetNull)
+  source    MediaAsset? @relation("ContentSource", fields: [sourceId], references: [id], onDelete: SetNull)
+  creator   Creator?    @relation(fields: [creatorId], references: [id], onDelete: SetNull)
+  category  Category?   @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  tags       ContentTag[]
+  favorites  Favorite[]
+  views      View[]
+  history    ViewingHistory[]
+  renditions VideoRendition[]
+  jobs       ProcessingJob[]
+
+  // Listing queries always filter on status first, then order by one of
+  // publishedAt / viewCount, optionally scoped to a creator or category.
+  @@index([status, publishedAt(sort: Desc)])
+  @@index([status, viewCount(sort: Desc)])
+  @@index([status, isFeatured, publishedAt(sort: Desc)])
+  @@index([creatorId, status, publishedAt(sort: Desc)])
+  @@index([categoryId, status, publishedAt(sort: Desc)])
+  @@index([kind, status])
+  @@index([processingStatus, createdAt])
+  @@map("content")
+}
+
+model ContentTag {
+  contentId String   @map("content_id")
+  tagId     String   @map("tag_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  tag     Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([contentId, tagId])
+  @@index([tagId, contentId])
+  @@map("content_tags")
+}
+
+/// One HLS variant produced for a recording. Rows exist only for renditions
+/// that were actually written, so the ladder never advertises a resolution
+/// that is not on disk.
+model VideoRendition {
+  id           String   @id @default(cuid())
+  contentId    String   @map("content_id")
+  /// "1080p", "720p", "480p"
+  label        String
+  width        Int
+  height       Int
+  bitrateKbps  Int      @map("bitrate_kbps")
+  playlistKey  String   @map("playlist_key")
+  sizeBytes    Int?     @map("size_bytes")
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+
+  @@unique([contentId, label])
+  @@index([contentId])
+  @@map("video_renditions")
+}
+
+/// Durable job queue.
+///
+/// A table rather than an in-memory list: jobs must survive a deploy or a
+/// crash, and a half-finished transcode has to be visible to an administrator
+/// afterwards. `lockedAt`/`lockedBy` let several workers share the queue
+/// without racing for the same row.
+model ProcessingJob {
+  id        String    @id @default(cuid())
+  contentId String    @map("content_id")
+  kind      String    @default("PROCESS_VIDEO")
+  status    JobStatus @default(QUEUED)
+  attempts  Int       @default(0)
+  maxAttempts Int     @default(3) @map("max_attempts")
+  /// Set when a retry is scheduled; workers ignore rows until this passes.
+  runAfter  DateTime  @default(now()) @map("run_after")
+  lockedAt  DateTime? @map("locked_at")
+  lockedBy  String?   @map("locked_by")
+  lastError String?   @map("last_error")
+  payload   Json?
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+
+  @@index([status, runAfter])
+  @@index([contentId, createdAt])
+  @@map("processing_jobs")
+}
+
+// ---------------------------------------------------------------- engagement
+
+model Favorite {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  contentId String   @map("content_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, contentId])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([contentId])
+  @@map("favorites")
+}
+
+/// Append-only view log used for popularity windows and analytics.
+/// Anonymous views are attributed to a rotating hashed session key — no raw
+/// IP addresses are ever stored.
+model View {
+  id         String   @id @default(cuid())
+  contentId  String   @map("content_id")
+  userId     String?  @map("user_id")
+  sessionKey String?  @map("session_key")
+  referrer   String?
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([contentId, createdAt(sort: Desc)])
+  @@index([createdAt])
+  // Covers the trending window: recent rows grouped by content.
+  @@index([createdAt, contentId])
+  // "Active readers in the last N days" without scanning the whole log.
+  @@index([userId, createdAt])
+  @@map("views")
+}
+
+/// One row per user+content: the resumable "continue watching" record.
+model ViewingHistory {
+  id              String   @id @default(cuid())
+  userId          String   @map("user_id")
+  contentId       String   @map("content_id")
+  progressSeconds Int      @default(0) @map("progress_seconds")
+  completed       Boolean  @default(false)
+  viewCount       Int      @default(1) @map("view_count")
+  lastViewedAt    DateTime @default(now()) @map("last_viewed_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  content Content @relation(fields: [contentId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, contentId])
+  @@index([userId, lastViewedAt(sort: Desc)])
+  @@map("viewing_history")
+}
+
+model Report {
+  id          String           @id @default(cuid())
+  targetType  ReportTargetType @default(CONTENT) @map("target_type")
+  targetId    String           @map("target_id")
+  reason      ReportReason
+  message     String?          @db.Text
+  status      ReportStatus     @default(OPEN)
+  authorId    String?          @map("author_id")
+  handlerId   String?          @map("handler_id")
+  handlerNote String?          @map("handler_note")
+  resolvedAt  DateTime?        @map("resolved_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+  updatedAt   DateTime         @updatedAt @map("updated_at")
+
+  author  User? @relation("ReportAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+  handler User? @relation("ReportHandler", fields: [handlerId], references: [id], onDelete: SetNull)
+
+  @@index([status, createdAt(sort: Desc)])
+  @@index([createdAt])
+  @@index([targetType, targetId])
+  @@map("reports")
+}
+
+// ---------------------------------------------------------------- operations
+
+/// Key/value site configuration (branding, SEO defaults, feature flags).
+/// Grouped so the admin UI can render one form per group.
+model SiteSetting {
+  key       String   @id
+  group     String   @default("general")
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@index([group])
+  @@map("site_settings")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?  @map("actor_id")
+  action     String
+  entityType String   @map("entity_type")
+  entityId   String?  @map("entity_id")
+  metadata   Json?
+  ipHash     String?  @map("ip_hash")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([createdAt(sort: Desc)])
+  @@map("audit_logs")
+}

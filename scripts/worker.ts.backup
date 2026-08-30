@@ -1,0 +1,16 @@
+async function main() {
+  try {
+    const tools = await assertToolchain();
+    console.info(`[worker] ${tools.ffmpeg}`);
+    console.info(`[worker] ${tools.ffprobe}`);
+  } catch (error) {
+    console.error("[worker] FFmpeg and ffprobe could not be started.");
+    if (error instanceof Error) console.error(`         ${error.message}`);
+    console.error("         Put ffmpeg.exe and ffprobe.exe in ./tools, or set FFMPEG_PATH / FFPROBE_PATH.");
+    process.exit(1);
+  }
+
+  await runWorker(controller.signal);
+}
+
+void main();

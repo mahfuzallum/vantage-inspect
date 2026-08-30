@@ -1,0 +1,315 @@
+@import "tailwindcss";
+
+/*
+  Vantage Archive design tokens.
+
+  Direction: a dark reading room for recorded material. The neutral ramp is
+  cooled slightly (blue-green cast) so the single warm accent — brass, taken
+  from film leader and library card stock — is the only saturated colour on
+  screen. Metadata is set in mono and treated as timecode, which is the
+  signature device of the interface.
+
+  Every value below is a token. Components reference tokens, never raw hex.
+*/
+
+@theme {
+  /* ---- surfaces ---- */
+  --color-base: #08080D; /* page background */
+  --color-surface: #111118; /* cards, header */
+  --color-raised: #171720; /* hover, popovers, inputs */
+  --color-sunken: #06060A; /* media wells, code */
+  --color-line: #27232F; /* default border */
+  --color-line-strong: #3B3448; /* focus ring track, dividers */
+
+  /* ---- ink ---- */
+  --color-ink: #F5F3FA;
+  --color-ink-muted: #A7A1B5;
+  --color-ink-faint: #706A7D;
+
+  /* ---- accent: brass ---- */
+  --color-accent: #8B5CF6;
+  --color-accent-strong: #A78BFA;
+  --color-accent-dim: #5B3BA6;
+  --color-accent-ink: #FFFFFF; /* text on an accent fill */
+  /* Secondary hue, used only in ambient glow gradients for depth — never on
+     text, borders or anything that needs to read as "the" brand colour. */
+  --color-accent-2: #EC4899;
+  /* Wordmark gold. Reserved for the star and the highlighted word in the
+     tagline — it marks the brand, so spending it elsewhere would dilute it. */
+  --color-gold: #F5A623;
+
+  /* ---- status ---- */
+  --color-positive: #4fae7f;
+  --color-caution: #d68a3a;
+  --color-critical: #d15b5b;
+
+  /* ---- typography ---- */
+  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, "SFMono-Regular", monospace;
+
+  --text-2xs: 0.6875rem; /* 11px — timecodes, eyebrow labels */
+  --text-2xs--line-height: 1rem;
+
+  /*
+    Type scale. Seven roles, each with a job:
+      display  hero only, once per page
+      page     h1 on listing and detail pages
+      section  h2 on home rails and page sections
+      card     h3 on content and creator cards
+      body     paragraphs and descriptions
+      meta     card metadata rows
+      label    mono slates and eyebrows (see --text-2xs)
+    Sizes are deliberately restrained — the display size stays under 3rem so
+    the hero never crowds out the browsing grid below it.
+  */
+  --text-display: 2rem;
+  --text-display--line-height: 1.12;
+  --text-display--letter-spacing: -0.03em;
+  --text-display--font-weight: 600;
+
+  --text-page: 1.5rem;
+  --text-page--line-height: 1.2;
+  --text-page--letter-spacing: -0.02em;
+
+  --text-section: 1.25rem;
+  --text-section--line-height: 1.25;
+  --text-section--letter-spacing: -0.02em;
+
+  --text-card: 0.9375rem;
+  --text-card--line-height: 1.4;
+  --text-card--letter-spacing: -0.01em;
+
+  --text-meta: 0.8125rem;
+  --text-meta--line-height: 1.35;
+
+  /* ---- radius ---- */
+  --radius-control: 0.5rem;
+  --radius-card: 0.75rem;
+  --radius-panel: 1rem;
+
+  /* ---- elevation ---- */
+  --shadow-card: 0 1px 2px rgb(0 0 0 / 0.4);
+  --shadow-raised: 0 8px 24px -8px rgb(0 0 0 / 0.6);
+  --shadow-overlay: 0 24px 64px -16px rgb(0 0 0 / 0.75);
+
+  /* ---- motion ---- */
+  --ease-out-quick: cubic-bezier(0.2, 0.8, 0.3, 1);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-line);
+  }
+
+  html {
+    color-scheme: dark;
+    scrollbar-gutter: stable;
+  }
+
+  body {
+    background-color: var(--color-base);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-feature-settings:
+      "cv05" 1,
+      "ss03" 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-family: var(--font-display);
+    letter-spacing: -0.02em;
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* One focus treatment everywhere, always visible on keyboard nav. */
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: var(--radius-control);
+  }
+
+  ::selection {
+    background-color: var(--color-accent);
+    color: var(--color-accent-ink);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /*
+    Signature device: an eyebrow label set as a mono "slate" — the strip of
+    metadata burned into the head of a film reel. Used above every section
+    heading and on card metadata rows.
+  */
+  .slate {
+    font-family: var(--font-mono);
+    font-size: var(--text-2xs);
+    line-height: 1;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-ink-faint);
+  }
+
+  .slate-accent {
+    color: var(--color-accent);
+  }
+
+  /* Hairline rule with a short brass leader, marking section starts. */
+  .leader-rule {
+    position: relative;
+    height: 1px;
+    background: var(--color-line);
+  }
+
+  .leader-rule::before {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    left: 0;
+    width: 2.5rem;
+    background: var(--color-accent);
+  }
+
+  /* Two-line clamp used across every card title. */
+  .clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  /* Skip link — visible only when focused. */
+  .skip-link {
+    position: absolute;
+    left: 0.75rem;
+    top: -3rem;
+    z-index: 100;
+    padding: 0.5rem 0.875rem;
+    border-radius: var(--radius-control);
+    background: var(--color-accent);
+    color: var(--color-accent-ink);
+    font-weight: 600;
+    transition: top 150ms var(--ease-out-quick);
+  }
+
+  .skip-link:focus {
+    top: 0.75rem;
+  }
+}
+
+@layer utilities {
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      var(--color-raised) 0%,
+      var(--color-line) 50%,
+      var(--color-raised) 100%
+    );
+    background-size: 200% 100%;
+    animation: shimmer 1.4s ease-in-out infinite;
+  }
+
+  @keyframes shimmer {
+    to {
+      background-position: -200% 0;
+    }
+  }
+
+  /*
+    Ambient drift for the background glow orbs used across public pages.
+    Slow and small — this reads as light moving through a room, not as a
+    UI element asking for attention. Respects reduced motion via the rule
+    above, which already zeroes every animation duration site-wide.
+  */
+  @keyframes ambient-drift {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0) scale(1);
+    }
+    50% {
+      transform: translate3d(2%, -3%, 0) scale(1.06);
+    }
+  }
+
+  .animate-ambient {
+    animation: ambient-drift 18s ease-in-out infinite;
+  }
+
+  .animate-ambient-slow {
+    animation: ambient-drift 26s ease-in-out infinite reverse;
+  }
+
+  /*
+    Continuous marquee for the live ticker. The track holds two identical
+    copies of the list, so translating by exactly -50% lands the second copy
+    where the first began and the loop is invisible. Linear timing only —
+    any easing would make the seam obvious.
+  */
+  @keyframes marquee {
+    from {
+      transform: translate3d(0, 0, 0);
+    }
+    to {
+      transform: translate3d(-50%, 0, 0);
+    }
+  }
+
+  .animate-marquee {
+    animation: marquee 45s linear infinite;
+  }
+}
+
+@layer components {
+  /* Rank numerals: sequence is real information here, so it gets weight. */
+  .rank-numeral {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-size: 2.25rem;
+    line-height: 1;
+    font-weight: 500;
+    color: transparent;
+    -webkit-text-stroke: 1px var(--color-line-strong);
+  }
+
+  .rank-numeral-lead {
+    color: var(--color-accent);
+    -webkit-text-stroke: 0;
+  }
+}
+
+
+@layer components {
+  .site-glow {
+    background: radial-gradient(circle at 50% 0%, rgba(139,92,246,.16), transparent 42%);
+  }
+  .profile-page {
+    background: radial-gradient(circle at 78% 4%, rgba(139,92,246,.08), transparent 24%), var(--color-base);
+  }
+}
