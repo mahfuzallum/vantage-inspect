@@ -8,7 +8,7 @@
   "scripts": {
     "dev": "tsx scripts/dev.ts",
     "build": "prisma generate && next build",
-    "start": "start \"Next.js\" /b cmd /c \"npm run next:start\" && npm run worker",
+    "start": "next start",
     "next:start": "next start",
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
