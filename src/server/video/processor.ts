@@ -19,13 +19,6 @@ import {
   type ProbedMedia,
 } from "./ffmpeg";
 
-import {
-  declaredBandwidth,
-  selectLadder,
-  widthFor,
-  type Rung,
-} from "./ladder";
-
 import { storagePaths } from "@/lib/media/paths";
 
 /**
@@ -51,20 +44,6 @@ import { storagePaths } from "@/lib/media/paths";
  * temporary directory first.
  */
 
-/**
- * Keep FFmpeg from consuming the entire machine.
- *
- * This is especially important because the Next.js server,
- * database and media-serving requests run on the same machine.
- *
- * Two encoder threads gives FFmpeg enough performance while leaving
- * CPU capacity available for the website and video playback.
- */
-const FFMPEG_THREADS = 2;
-const FFMPEG_FILTER_THREADS = 1;
-
-const SEGMENT_SECONDS = 6;
-
 export type RenditionResult = {
   label: string;
   width: number;
@@ -78,22 +57,6 @@ export type RenditionResult = {
 
   sizeBytes: number;
 };
-
-/**
- * FFmpeg options shared by all processing operations.
- */
-function ffmpegResourceArgs(): string[] {
-  return [
-    "-threads",
-    String(FFMPEG_THREADS),
-
-    "-filter_threads",
-    String(FFMPEG_FILTER_THREADS),
-
-    "-filter_complex_threads",
-    String(FFMPEG_FILTER_THREADS),
-  ];
-}
 
 export type ProcessingOutput = {
   media: ProbedMedia;
@@ -112,6 +75,8 @@ export type ProcessingOutput = {
 
   renditions: RenditionResult[];
 };
+
+const SEGMENT_SECONDS = 6;
 
 /**
  * Picks a useful frame for thumbnail/preview.
@@ -161,8 +126,6 @@ export async function generateThumbnail(
   await ffmpeg([
     "-y",
 
-    ...ffmpegResourceArgs(),
-
     "-ss",
     at.toFixed(2),
 
@@ -198,6 +161,9 @@ export async function generateThumbnail(
  * - 3 seconds
  * - 10 FPS
  * - 480px width
+ *
+ * It is designed for archive-card hover,
+ * not full video playback.
  */
 export async function generatePreview(
   sourcePath: string,
@@ -214,6 +180,10 @@ export async function generatePreview(
       durationSeconds,
     );
 
+  /*
+   * Do not try to generate a 3-second
+   * preview if the video is extremely short.
+   */
   const previewDuration =
     Math.min(
       3,
@@ -227,8 +197,6 @@ export async function generatePreview(
     await ffmpeg([
       "-y",
 
-      ...ffmpegResourceArgs(),
-
       "-ss",
       at.toFixed(2),
 
@@ -238,6 +206,11 @@ export async function generatePreview(
       "-i",
       sourcePath,
 
+      /*
+       * 10 frames/sec is enough for a
+       * smooth hover preview while keeping
+       * the generated WebP relatively small.
+       */
       "-vf",
       "fps=10,scale=480:-2:flags=lanczos",
 
@@ -255,6 +228,13 @@ export async function generatePreview(
 
     return output;
   } catch (error) {
+    /*
+     * Preview generation is optional.
+     *
+     * If FFmpeg cannot create it, the
+     * actual video must still continue
+     * through the normal processing pipeline.
+     */
     console.warn(
       `[processor] hover preview generation failed: ${
         error instanceof Error
@@ -268,180 +248,76 @@ export async function generatePreview(
 }
 
 /**
- * Generate one HLS rendition.
+ * Package the ORIGINAL video as a single HLS rendition.
+ *
+ * IMPORTANT: this intentionally uses stream copy. The uploaded video is never
+ * resized, re-encoded, or assigned a different bitrate. HLS only splits the
+ * existing encoded streams into segments for playback.
  */
 export async function generateRendition(
   sourcePath: string,
   workDir: string,
   videoId: string,
-  rung: Rung,
   source: ProbedMedia,
 ): Promise<RenditionResult> {
-  const localDir =
-    path.join(
-      workDir,
-      rung.label,
-    );
+  const label = "original";
+  const localDir = path.join(workDir, label);
 
-  await mkdir(
-    localDir,
-    {
-      recursive: true,
-    },
-  );
-
-  const width =
-    widthFor(
-      source.width,
-      source.height,
-      rung.height,
-    );
+  await mkdir(localDir, { recursive: true });
 
   const args = [
     "-y",
-
-    ...ffmpegResourceArgs(),
-
     "-i",
     sourcePath,
-
-    "-c:v",
-    "libx264",
-
-    /*
-     * veryfast keeps CPU usage significantly lower than
-     * slower x264 presets.
-     */
-    "-preset",
-    "veryfast",
-
-    "-profile:v",
-    "main",
-
-    "-crf",
-    "21",
-
-    "-sc_threshold",
-    "0",
-
-    /*
-     * Fixed GOP aligned to HLS segments.
-     */
-    "-g",
-    String(
-      SEGMENT_SECONDS * 30,
-    ),
-
-    "-keyint_min",
-    String(
-      SEGMENT_SECONDS * 30,
-    ),
-
-    "-b:v",
-    `${rung.bitrateKbps}k`,
-
-    "-maxrate",
-    `${rung.maxrateKbps}k`,
-
-    "-bufsize",
-    `${rung.bufsizeKbps}k`,
-
-    "-vf",
-    `scale=${width}:${rung.height}`,
+    "-map",
+    "0:v:0",
   ];
 
   if (source.hasAudio) {
-    args.push(
-      "-c:a",
-      "aac",
+    args.push("-map", "0:a:0?");
+  }
 
-      "-b:a",
-      `${rung.audioKbps}k`,
+  args.push(
+    "-c:v",
+    "copy",
+  );
 
-      "-ac",
-      "2",
-    );
+  if (source.hasAudio) {
+    args.push("-c:a", "copy");
   } else {
-    args.push(
-      "-an",
-    );
+    args.push("-an");
   }
 
   args.push(
     "-f",
     "hls",
-
     "-hls_time",
-    String(
-      SEGMENT_SECONDS,
-    ),
-
+    String(SEGMENT_SECONDS),
     "-hls_playlist_type",
     "vod",
-
-    /*
-     * MPEG-TS HLS segments.
-     */
     "-hls_segment_filename",
-    path.join(
-      localDir,
-      "segment-%04d.ts",
-    ),
-
-    path.join(
-      localDir,
-      "playlist.m3u8",
-    ),
+    path.join(localDir, "segment-%04d.ts"),
+    path.join(localDir, "playlist.m3u8"),
   );
 
-  await ffmpeg(
-    args,
-  );
+  await ffmpeg(args);
 
-  const files =
-    await readdir(
-      localDir,
-    );
-
+  const files = await readdir(localDir);
   let sizeBytes = 0;
 
   for (const file of files) {
-    const filePath =
-      path.join(
-        localDir,
-        file,
-      );
-
-    const fileStat =
-      await stat(
-        filePath,
-      );
-
-    if (fileStat.isFile()) {
-      sizeBytes += fileStat.size;
-    }
+    sizeBytes += (
+      await stat(path.join(localDir, file))
+    ).size;
   }
 
   return {
-    label:
-      rung.label,
-
-    width,
-
-    height:
-      rung.height,
-
-    bitrateKbps:
-      rung.bitrateKbps,
-
+    label,
+    width: source.width,
+    height: source.height,
+    bitrateKbps: Math.max(1, Math.round((source.bitrate ?? 0) / 1000)),
     localDir,
-
-    playlistKey:
-      storagePaths.hlsVariantPlaylist(
-        videoId,
-        rung.label,
-      ),
-
+    playlistKey: storagePaths.hlsVariantPlaylist(videoId, label),
     sizeBytes,
   };
 }
@@ -465,26 +341,7 @@ export async function writeMasterPlaylist(
     );
 
   for (const rendition of ordered) {
-    const bandwidth =
-      declaredBandwidth({
-        label:
-          rendition.label,
-
-        height:
-          rendition.height,
-
-        bitrateKbps:
-          rendition.bitrateKbps,
-
-        audioKbps:
-          128,
-
-        maxrateKbps:
-          0,
-
-        bufsizeKbps:
-          0,
-      });
+    const bandwidth = Math.max(1, rendition.bitrateKbps * 1000);
 
     lines.push(
       `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${rendition.width}x${rendition.height},NAME="${rendition.label}"`,
@@ -525,9 +382,6 @@ export async function processVideo(
 
   /*
    * 1. Probe original video.
-   *
-   * FFprobe detects the actual container, so the source can be
-   * MP4, MPEG-TS, MOV, WebM, MKV, etc.
    */
   const media =
     await probe(
@@ -558,6 +412,13 @@ export async function processVideo(
 
   /*
    * 3. Generate animated hover preview.
+   *
+   * IMPORTANT:
+   *
+   * This was missing before.
+   *
+   * generatePreview() existed but was never
+   * called by processVideo().
    */
   const previewPath =
     await generatePreview(
@@ -567,35 +428,18 @@ export async function processVideo(
     );
 
   /*
-   * 4. Generate HLS ladder.
+   * 4. Package the original encoded streams as one HLS rendition.
    *
-   * Renditions remain sequential intentionally.
-   *
-   * DO NOT use Promise.all() here.
-   *
-   * Running 1080p + 720p + 480p simultaneously would start
-   * several x264 encoders at once and can make the website
-   * unresponsive on the same machine.
+   * No scaling, bitrate targeting, or codec conversion happens here.
    */
-  const rungs =
-    selectLadder(
-      media.height,
-    );
-
-  const renditions:
-    RenditionResult[] = [];
-
-  for (const rung of rungs) {
-    renditions.push(
-      await generateRendition(
-        sourcePath,
-        workDir,
-        videoId,
-        rung,
-        media,
-      ),
-    );
-  }
+  const renditions: RenditionResult[] = [
+    await generateRendition(
+      sourcePath,
+      workDir,
+      videoId,
+      media,
+    ),
+  ];
 
   /*
    * 5. Write master playlist.

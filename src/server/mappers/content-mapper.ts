@@ -2,6 +2,7 @@ import "server-only";
 import type { Category, Content, Creator, MediaAsset, Tag } from "@prisma/client";
 import { resolveAssetUrl } from "@/lib/media";
 import { publicMediaUrl } from "@/lib/media/hls";
+import { storagePaths } from "@/lib/media/paths";
 import { safeExternalUrl } from "@/lib/security/sanitize";
 import type {
   CategorySummary,
@@ -101,7 +102,9 @@ export async function toContentCard(row: ContentCardRow): Promise<ContentCardMod
     summary: row.summary,
     kind: row.kind,
     durationSeconds: row.durationSeconds,
-    thumbnailUrl: await resolveAssetUrl(row.thumbnail),
+    thumbnailUrl:
+      (await resolveAssetUrl(row.thumbnail)) ??
+      publicMediaUrl(storagePaths.thumbnail(row.id)),
     previewUrl: await resolveAssetUrl(row.source),
     viewCount: row.viewCount,
     favoriteCount: row.favoriteCount,

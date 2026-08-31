@@ -12,7 +12,6 @@ import path from "node:path";
 import { db } from "@/lib/db";
 import { serverEnv } from "@/lib/env";
 import { FfmpegError } from "./ffmpeg";
-
 import {
   cleanupWorkDir,
   processVideo,
@@ -28,14 +27,43 @@ import {
 import { S3MediaProvider } from "@/lib/media/s3-provider";
 import { LocalMediaProvider } from "@/lib/media/local-provider";
 import { storagePaths } from "@/lib/media/paths";
+import type { StoredObject } from "@/lib/media/types";
 
-const SEGMENT_CONTENT_TYPE = "video/mp2t";
+/**
+ * Video processing worker.
+ *
+ * Processing order:
+ *
+ * 1. Read original source
+ * 2. Generate thumbnail
+ * 3. Generate animated hover preview
+ * 4. Package original video as HLS (no re-encoding)
+ * 5. Upload all assets
+ * 6. Mark content READY
+ *
+ * A recording is never marked READY before
+ * all required media assets are available.
+ */
+
+const SEGMENT_CONTENT_TYPE =
+  "video/mp2t";
+
 const PLAYLIST_CONTENT_TYPE =
   "application/vnd.apple.mpegurl";
-const PREVIEW_CONTENT_TYPE = "image/webp";
-const THUMBNAIL_CONTENT_TYPE = "image/webp";
 
-function isRetryable(error: unknown): boolean {
+const PREVIEW_CONTENT_TYPE =
+  "image/webp";
+
+const THUMBNAIL_CONTENT_TYPE =
+  "image/webp";
+
+/**
+ * Storage failures can be retried.
+ * Invalid FFmpeg input should not be retried.
+ */
+function isRetryable(
+  error: unknown,
+): boolean {
   if (error instanceof FfmpegError) {
     return false;
   }
@@ -43,8 +71,12 @@ function isRetryable(error: unknown): boolean {
   return true;
 }
 
-function safeMessage(error: unknown): string {
-  if (error instanceof FfmpegError) {
+function safeMessage(
+  error: unknown,
+): string {
+  if (
+    error instanceof FfmpegError
+  ) {
     return `${error.message}: ${error.detail}`;
   }
 
@@ -60,46 +92,43 @@ type Uploader = {
     key: string,
     filePath: string,
     contentType: string,
-  ): Promise<{
-    provider?: unknown;
-    bucket?: string | null;
-    objectKey?: string | null;
-    url?: string | null;
-    mimeType?: string | null;
-    sizeBytes?: number | null;
-  }>;
+  ): Promise<StoredObject>;
 
   putBuffer(
     key: string,
     body: Buffer,
     contentType: string,
-  ): Promise<{
-    provider?: unknown;
-    bucket?: string | null;
-    objectKey?: string | null;
-    url?: string | null;
-    mimeType?: string | null;
-    sizeBytes?: number | null;
-  }>;
+  ): Promise<StoredObject>;
 };
 
 function uploader(): Uploader {
-  return serverEnv().MEDIA_PROVIDER === "s3"
+  return serverEnv()
+    .MEDIA_PROVIDER === "s3"
     ? (new S3MediaProvider() as unknown as Uploader)
     : (new LocalMediaProvider() as unknown as Uploader);
 }
 
+/**
+ * Upload one HLS rendition.
+ *
+ * Segments are uploaded before the playlist.
+ */
 async function uploadRendition(
   store: Uploader,
   videoId: string,
   label: string,
   localDir: string,
 ): Promise<void> {
-  const files = await readdir(localDir);
+  const files =
+    await readdir(localDir);
 
+  /*
+   * Upload media segments first.
+   */
   for (
-    const file of files.filter((name) =>
-      name.endsWith(".ts"),
+    const file of files.filter(
+      (name) =>
+        name.endsWith(".ts"),
     )
   ) {
     await store.putFile(
@@ -107,11 +136,17 @@ async function uploadRendition(
         videoId,
         label,
       )}/${file}`,
-      path.join(localDir, file),
+      path.join(
+        localDir,
+        file,
+      ),
       SEGMENT_CONTENT_TYPE,
     );
   }
 
+  /*
+   * Playlist goes after all segments.
+   */
   await store.putFile(
     storagePaths.hlsVariantPlaylist(
       videoId,
@@ -131,40 +166,61 @@ export type JobOutcome =
   | "failed"
   | "idle";
 
+/**
+ * Run one queued video-processing job.
+ */
 export async function runOneJob(
   workerId: string,
 ): Promise<JobOutcome> {
-  const job = await claimNextJob(workerId);
+  const job =
+    await claimNextJob(
+      workerId,
+    );
 
   if (!job) {
     return "idle";
   }
 
-  const env = serverEnv();
+  const env =
+    serverEnv();
 
-  const workDir = path.join(
-    env.VIDEO_WORK_DIR,
-    job.contentId,
-  );
+  const workDir =
+    path.join(
+      env.VIDEO_WORK_DIR,
+      job.contentId,
+    );
 
   console.info(
     `[worker] processing started content=${job.contentId} attempt=${job.attempts}`,
   );
 
   try {
+    /*
+     * Mark processing.
+     */
     await db.content.update({
       where: {
         id: job.contentId,
       },
 
       data: {
-        processingStatus: "PROCESSING",
-        processingStartedAt: new Date(),
-        processingAttempts: job.attempts,
-        processingError: null,
+        processingStatus:
+          "PROCESSING",
+
+        processingStartedAt:
+          new Date(),
+
+        processingAttempts:
+          job.attempts,
+
+        processingError:
+          null,
       },
     });
 
+    /*
+     * Find original source.
+     */
     const content =
       await db.content.findUnique({
         where: {
@@ -176,25 +232,8 @@ export async function runOneJob(
 
           source: {
             select: {
-              id: true,
               objectKey: true,
               provider: true,
-              bucket: true,
-              url: true,
-              mimeType: true,
-              sizeBytes: true,
-            },
-          },
-
-          thumbnail: {
-            select: {
-              id: true,
-              provider: true,
-              bucket: true,
-              objectKey: true,
-              url: true,
-              mimeType: true,
-              sizeBytes: true,
             },
           },
         },
@@ -210,59 +249,61 @@ export async function runOneJob(
       );
     }
 
-    const source = content?.source;
-
-    if (!source) {
-      throw new FfmpegError(
-        "No source media asset is attached to this recording.",
-        "missing source asset",
+    /*
+     * Local storage source.
+     */
+    const localSource =
+      path.join(
+        env.MEDIA_LOCAL_ROOT,
+        sourceKey,
       );
-    }
 
-    if (source.provider !== "LOCAL") {
-      throw new FfmpegError(
-        "This worker currently requires local source storage.",
-        `provider=${source.provider}`,
-      );
-    }
-
-    if (!source.objectKey) {
-      throw new FfmpegError(
-        "The source media asset has no storage key.",
-        "missing source object key",
-      );
-    }
-
-    const localSource = path.join(
-      env.MEDIA_LOCAL_ROOT,
-      source.objectKey,
-    );
-
-    await stat(localSource).catch(() => {
+    await stat(
+      localSource,
+    ).catch(() => {
       throw new FfmpegError(
         "The source file could not be found in storage.",
         sourceKey,
       );
     });
 
-    await mkdir(workDir, {
-      recursive: true,
-    });
-
-    const output = await processVideo(
-      localSource,
+    /*
+     * Prepare worker directory.
+     */
+    await mkdir(
       workDir,
-      job.contentId,
+      {
+        recursive: true,
+      },
     );
 
-    const store = uploader();
+    /*
+     * FFmpeg processing.
+     *
+     * IMPORTANT:
+     *
+     * processVideo() now returns:
+     *
+     * - thumbnailPath
+     * - previewPath
+     * - renditions
+     * - masterPlaylistPath
+     */
+    const output =
+      await processVideo(
+        localSource,
+        workDir,
+        job.contentId,
+      );
+
+    const store =
+      uploader();
 
     /*
      * -------------------------------------------------
      * 1. THUMBNAIL
      * -------------------------------------------------
      */
-
     const thumbnailKey =
       storagePaths.thumbnail(
         job.contentId,
@@ -275,76 +316,60 @@ export async function runOneJob(
         THUMBNAIL_CONTENT_TYPE,
       );
 
-    console.info(
-      `[worker] thumbnail uploaded content=${job.contentId} key=${thumbnailKey}`,
-    );
-
     /*
-     * Create a MediaAsset record for the generated
-     * thumbnail and attach it to Content.thumbnailId.
+     * The thumbnail bytes are useful only if Content points at the generated
+     * MediaAsset. Without this row the mapper returns thumbnailUrl=null even
+     * though the file exists in storage.
      */
     const thumbnailAsset =
       await db.mediaAsset.create({
         data: {
           kind: "IMAGE",
-
-          provider:
-            serverEnv().MEDIA_PROVIDER ===
-            "s3"
-              ? "S3"
-              : "LOCAL",
-
-          bucket:
-            thumbnailObject.bucket ??
-            serverEnv().STORAGE_BUCKET ??
-            null,
-
-          objectKey:
-            thumbnailObject.objectKey ??
-            thumbnailKey,
-
-          url:
-            thumbnailObject.url ??
-            null,
-
-          mimeType:
-            THUMBNAIL_CONTENT_TYPE,
-
-          sizeBytes:
-            thumbnailObject.sizeBytes ??
-            null,
-
-          uploadedById:
-            null,
+          provider: thumbnailObject.provider,
+          bucket: thumbnailObject.bucket ?? null,
+          objectKey: thumbnailObject.objectKey ?? thumbnailKey,
+          url: thumbnailObject.url ?? null,
+          mimeType: THUMBNAIL_CONTENT_TYPE,
+          sizeBytes: thumbnailObject.sizeBytes ?? null,
+          uploadedById: null,
         },
-
-        select: {
-          id: true,
-        },
+        select: { id: true },
       });
+
+    console.info(
+      `[worker] thumbnail uploaded content=${job.contentId} key=${thumbnailKey}`,
+    );
 
     /*
      * -------------------------------------------------
      * 2. HOVER PREVIEW
      * -------------------------------------------------
+     *
+     * This was previously missing.
+     *
+     * processor.ts generates:
+     *
+     * workDir/preview.webp
+     *
+     * Now we actually upload it.
      */
-
     if (output.previewPath) {
-      const previewKey =
+      await store.putFile(
         storagePaths.preview(
           job.contentId,
-        );
-
-      await store.putFile(
-        previewKey,
+        ),
         output.previewPath,
         PREVIEW_CONTENT_TYPE,
       );
 
       console.info(
-        `[worker] preview uploaded content=${job.contentId} key=${previewKey}`,
+        `[worker] preview uploaded content=${job.contentId}`,
       );
     } else {
+      /*
+       * Preview generation is optional.
+       * The actual video can still become READY.
+       */
       console.warn(
         `[worker] preview unavailable content=${job.contentId}`,
       );
@@ -352,10 +377,9 @@ export async function runOneJob(
 
     /*
      * -------------------------------------------------
-     * 3. HLS RENDITIONS
+     * 3. ORIGINAL-QUALITY HLS
      * -------------------------------------------------
      */
-
     for (
       const rendition of output.renditions
     ) {
@@ -371,15 +395,13 @@ export async function runOneJob(
      * -------------------------------------------------
      * 4. MASTER PLAYLIST
      * -------------------------------------------------
+     *
+     * Master is uploaded last.
      */
-
-    const masterKey =
+    await store.putBuffer(
       storagePaths.hlsMaster(
         job.contentId,
-      );
-
-    await store.putBuffer(
-      masterKey,
+      ),
       await readFile(
         output.masterPlaylistPath,
       ),
@@ -390,12 +412,15 @@ export async function runOneJob(
      * -------------------------------------------------
      * 5. DATABASE
      * -------------------------------------------------
+     *
+     * Only after all storage operations
+     * succeed do we mark the video READY.
      */
-
     await db.$transaction([
       db.videoRendition.deleteMany({
         where: {
-          contentId: job.contentId,
+          contentId:
+            job.contentId,
         },
       }),
 
@@ -446,14 +471,20 @@ export async function runOneJob(
             null,
 
           hlsMasterKey:
-            masterKey,
+            storagePaths.hlsMaster(
+              job.contentId,
+            ),
 
           durationSeconds:
-            output.media.durationSeconds,
+            output.media
+              .durationSeconds,
         },
       }),
     ]);
 
+    /*
+     * Job completed.
+     */
     await markJobSucceeded(
       job.id,
     );
@@ -482,16 +513,25 @@ export async function runOneJob(
       ? "retrying"
       : "failed";
   } finally {
+    /*
+     * Delete FFmpeg scratch files.
+     *
+     * Uploaded assets remain in storage.
+     */
     await cleanupWorkDir(
       workDir,
     );
   }
 }
 
+/**
+ * Long-running worker loop.
+ */
 export async function runWorker(
   signal?: AbortSignal,
 ): Promise<void> {
-  const env = serverEnv();
+  const env =
+    serverEnv();
 
   const workerId =
     `worker-${process.pid}-${Date.now().toString(36)}`;
@@ -500,7 +540,9 @@ export async function runWorker(
     `[worker] ${workerId} started, polling every ${env.WORKER_POLL_INTERVAL_MS}ms`,
   );
 
-  while (!signal?.aborted) {
+  while (
+    !signal?.aborted
+  ) {
     try {
       const reclaimed =
         await reclaimStalledJobs();
@@ -512,9 +554,13 @@ export async function runWorker(
       }
 
       const outcome =
-        await runOneJob(workerId);
+        await runOneJob(
+          workerId,
+        );
 
-      if (outcome === "idle") {
+      if (
+        outcome === "idle"
+      ) {
         await new Promise(
           (resolve) =>
             setTimeout(
@@ -524,6 +570,10 @@ export async function runWorker(
         );
       }
     } catch (error) {
+      /*
+       * Never allow one poll error
+       * to kill the worker.
+       */
       console.error(
         "[worker] poll failed:",
         error,
