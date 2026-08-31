@@ -1,0 +1,10 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+.tmp
+*.log
+tools/ffmpeg.exe
+tools/ffprobe.exe
