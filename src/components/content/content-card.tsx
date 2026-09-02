@@ -2,6 +2,11 @@
 
 import Link from "next/link";
 import { BadgeCheck, Eye, Play } from "lucide-react";
+import {
+  useCallback,
+  useEffect,
+  useState,
+} from "react";
 
 import { routes } from "@/config/routes";
 import {
@@ -60,64 +65,191 @@ const IMAGE_SIZES: Record<
 };
 
 /**
- * Smart Link configuration.
- *
- * TEMPORARY TEST VALUE.
- *
- * This will later be controlled from:
- *
- * Admin Panel
- *   ↓
- * Database
- *   ↓
- * Monetization settings
+ * Smart Link configuration returned by /api/monetization.
  */
-const SMART_LINK_ENABLED = true;
-
-const SMART_LINK_URL =
-  "https://YOUR-SMART-LINK-HERE.com";
+type SmartLinkSettings = {
+  enabled: boolean;
+  url: string;
+  triggerCount: number;
+  triggerMode:
+    | "fixed"
+    | "random_2_3"
+    | "random_3_5";
+};
 
 /**
- * Number of video clicks that should trigger
- * the Smart Link.
+ * Storage prefixes.
  *
- * 1 = first click
- * 2 = first two clicks
- * 3 = first three clicks
+ * The counter and selected random threshold are stored separately.
+ * This makes every video independent.
  */
-const SMART_LINK_TRIGGER_COUNT = 2;
+const SMART_LINK_CLICK_PREFIX =
+  "smart-link-clicks:";
+
+const SMART_LINK_THRESHOLD_PREFIX =
+  "smart-link-threshold:";
 
 /**
- * Session-based counter.
+ * Safe default.
  *
- * The visitor gets a fresh counter when a new
- * browser session starts.
+ * If the API is temporarily unavailable, normal video navigation is allowed.
  */
-const SMART_LINK_STORAGE_KEY =
-  "video-smart-link-click-count";
+const DEFAULT_SMART_LINK_SETTINGS: SmartLinkSettings =
+  {
+    enabled: false,
+    url: "",
+    triggerCount: 3,
+    triggerMode: "fixed",
+  };
 
 /**
- * Opens the Smart Link in a new tab.
- *
- * The current website remains open.
- *
- * Returns true when an attempt to open the
- * Smart Link was made successfully.
+ * Build the storage key for a video.
  */
-function openSmartLink(): boolean {
-  /**
-   * Smart Link disabled.
-   */
-  if (!SMART_LINK_ENABLED) {
+function getClickStorageKey(
+  slug: string,
+): string {
+  return `${SMART_LINK_CLICK_PREFIX}${slug}`;
+}
+
+/**
+ * Build the storage key for the selected threshold.
+ */
+function getThresholdStorageKey(
+  slug: string,
+): string {
+  return `${SMART_LINK_THRESHOLD_PREFIX}${slug}`;
+}
+
+/**
+ * Read a positive integer from sessionStorage.
+ */
+function readStoredNumber(
+  key: string,
+): number | null {
+  try {
+    const value =
+      window.sessionStorage.getItem(
+        key,
+      );
+
+    if (value === null) {
+      return null;
+    }
+
+    const number = Number(value);
+
+    if (
+      !Number.isInteger(number) ||
+      number < 0
+    ) {
+      return null;
+    }
+
+    return number;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Save a number to sessionStorage.
+ */
+function saveStoredNumber(
+  key: string,
+  value: number,
+): void {
+  try {
+    window.sessionStorage.setItem(
+      key,
+      String(value),
+    );
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+/**
+ * Remove a stored value.
+ */
+function removeStoredValue(
+  key: string,
+): void {
+  try {
+    window.sessionStorage.removeItem(
+      key,
+    );
+  } catch {
+    // Ignore storage errors.
+  }
+}
+
+/**
+ * Return a random integer between min and max, inclusive.
+ */
+function randomInteger(
+  min: number,
+  max: number,
+): number {
+  return (
+    Math.floor(
+      Math.random() *
+        (max - min + 1),
+    ) + min
+  );
+}
+
+/**
+ * Select the Smart Link threshold.
+ *
+ * fixed:
+ *   Uses the Admin configured count.
+ *
+ * random_2_3:
+ *   Randomly chooses 2 or 3.
+ *
+ * random_3_5:
+ *   Randomly chooses 3, 4 or 5.
+ */
+function getThresholdForMode(
+  settings: SmartLinkSettings,
+): number {
+  if (
+    settings.triggerMode ===
+    "random_2_3"
+  ) {
+    return randomInteger(2, 3);
+  }
+
+  if (
+    settings.triggerMode ===
+    "random_3_5"
+  ) {
+    return randomInteger(3, 5);
+  }
+
+  return Math.min(
+    20,
+    Math.max(
+      1,
+      Math.floor(
+        settings.triggerCount,
+      ),
+    ),
+  );
+}
+
+/**
+ * Validate a Smart Link URL.
+ */
+function isValidSmartLinkUrl(
+  value: string,
+): boolean {
+  if (!value) {
     return false;
   }
 
-  /**
-   * Do not try to open the placeholder URL.
-   */
   if (
-    !SMART_LINK_URL ||
-    SMART_LINK_URL.includes(
+    value.includes(
       "YOUR-SMART-LINK-HERE",
     )
   ) {
@@ -125,53 +257,100 @@ function openSmartLink(): boolean {
   }
 
   try {
-    /**
-     * Read current click count.
-     */
-    const currentCount = Number(
-      window.sessionStorage.getItem(
-        SMART_LINK_STORAGE_KEY,
-      ) ?? "0",
-    );
+    const url =
+      new URL(value);
 
-    /**
-     * Trigger limit already reached.
-     */
-    if (
-      currentCount >=
-      SMART_LINK_TRIGGER_COUNT
-    ) {
-      return false;
+    return (
+      url.protocol ===
+        "http:" ||
+      url.protocol ===
+        "https:"
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Fetch the current monetization settings.
+ */
+async function fetchSmartLinkSettings(): Promise<SmartLinkSettings> {
+  try {
+    const response =
+      await fetch(
+        "/api/monetization",
+        {
+          method: "GET",
+          cache: "no-store",
+          credentials:
+            "same-origin",
+        },
+      );
+
+    if (!response.ok) {
+      return (
+        DEFAULT_SMART_LINK_SETTINGS
+      );
     }
 
-    /**
-     * Increase click count.
-     */
-    window.sessionStorage.setItem(
-      SMART_LINK_STORAGE_KEY,
-      String(currentCount + 1),
-    );
+    const data =
+      (await response.json()) as {
+        smartLinkEnabled?: unknown;
+        smartLinkUrl?: unknown;
+        smartLinkTriggerCount?: unknown;
+        smartLinkTriggerMode?: unknown;
+      };
 
-    /**
-     * Open Smart Link in a separate tab.
-     *
-     * The main website stays open.
-     */
-    const popup = window.open(
-      SMART_LINK_URL,
-      "_blank",
-      "noopener,noreferrer",
-    );
+    const triggerCount =
+      Number(
+        data.smartLinkTriggerCount ??
+          3,
+      );
 
-    return Boolean(popup);
+    const safeTriggerCount =
+      Number.isInteger(
+        triggerCount,
+      )
+        ? Math.min(
+            20,
+            Math.max(
+              1,
+              triggerCount,
+            ),
+          )
+        : 3;
+
+    const triggerMode =
+      data.smartLinkTriggerMode ===
+        "random_2_3" ||
+      data.smartLinkTriggerMode ===
+        "random_3_5"
+        ? data.smartLinkTriggerMode
+        : "fixed";
+
+    const url =
+      typeof data.smartLinkUrl ===
+      "string"
+        ? data.smartLinkUrl.trim()
+        : "";
+
+    return {
+      enabled:
+        Boolean(
+          data.smartLinkEnabled,
+        ),
+
+      url,
+
+      triggerCount:
+        safeTriggerCount,
+
+      triggerMode,
+    };
   } catch {
-    /**
-     * sessionStorage or popup may be blocked
-     * by the browser.
-     *
-     * Never break normal video navigation.
-     */
-    return false;
+    return (
+      DEFAULT_SMART_LINK_SETTINGS
+    );
   }
 }
 
@@ -182,21 +361,240 @@ export function ContentCard({
   showCategory = true,
   className,
 }: ContentCardProps) {
+  const [
+    smartLinkSettings,
+    setSmartLinkSettings,
+  ] = useState<SmartLinkSettings>(
+    DEFAULT_SMART_LINK_SETTINGS,
+  );
+
   /**
-   * Handles video-card clicks.
-   *
-   * IMPORTANT:
-   *
-   * We do not call preventDefault().
-   *
-   * Therefore:
-   *
-   * 1. Smart Link opens in a new tab.
-   * 2. The current tab continues to the video page.
+   * Load Smart Link configuration
+   * when the card mounts.
    */
-  function handleVideoClick() {
-    openSmartLink();
-  }
+  useEffect(() => {
+    let active = true;
+
+    fetchSmartLinkSettings().then(
+      (settings) => {
+        if (active) {
+          setSmartLinkSettings(
+            settings,
+          );
+        }
+      },
+    );
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  /**
+   * Get the currently stored click count.
+   */
+  const getVideoClicks =
+    useCallback((): number => {
+      return (
+        readStoredNumber(
+          getClickStorageKey(
+            content.slug,
+          ),
+        ) ?? 0
+      );
+    }, [content.slug]);
+
+  /**
+   * Get or create this video's Smart Link threshold.
+   *
+   * Random modes are selected once per video,
+   * rather than changing on every click.
+   */
+  const getVideoThreshold =
+    useCallback(
+      (
+        settings: SmartLinkSettings,
+      ): number => {
+        const key =
+          getThresholdStorageKey(
+            content.slug,
+          );
+
+        const stored =
+          readStoredNumber(key);
+
+        if (
+          stored !== null &&
+          stored >= 1 &&
+          stored <= 20
+        ) {
+          return stored;
+        }
+
+        const threshold =
+          getThresholdForMode(
+            settings,
+          );
+
+        saveStoredNumber(
+          key,
+          threshold,
+        );
+
+        return threshold;
+      },
+      [content.slug],
+    );
+
+  /**
+   * Open Smart Link directly from the user click.
+   *
+   * This is intentionally synchronous so the browser
+   * can treat it as a user-initiated popup.
+   */
+  const openSmartLink =
+    useCallback(
+      (
+        url: string,
+      ): boolean => {
+        if (
+          !isValidSmartLinkUrl(
+            url,
+          )
+        ) {
+          return false;
+        }
+
+        try {
+          const popup =
+            window.open(
+              url,
+              "_blank",
+              "noopener,noreferrer",
+            );
+
+          return (
+            popup !== null
+          );
+        } catch {
+          return false;
+        }
+      },
+      [],
+    );
+
+  /**
+   * Handle the main video click.
+   *
+   * Example with Fixed = 3:
+   *
+   * Click 1 -> Smart Link
+   * Click 2 -> Smart Link
+   * Click 3 -> Smart Link
+   * Click 4 -> Video
+   *
+   * Every video has its own counter.
+   */
+  const handleVideoClick =
+    useCallback(
+      (
+        event: React.MouseEvent<HTMLAnchorElement>,
+      ) => {
+        /**
+         * If Smart Link is disabled or invalid,
+         * normal video navigation continues.
+         */
+        if (
+          !smartLinkSettings.enabled ||
+          !isValidSmartLinkUrl(
+            smartLinkSettings.url,
+          )
+        ) {
+          return;
+        }
+
+        const currentCount =
+          getVideoClicks();
+
+        const threshold =
+          getVideoThreshold(
+            smartLinkSettings,
+          );
+
+        /**
+         * Smart Link phase.
+         */
+        if (
+          currentCount <
+          threshold
+        ) {
+          /**
+           * Prevent normal video navigation.
+           */
+          event.preventDefault();
+
+          const nextCount =
+            currentCount + 1;
+
+          saveStoredNumber(
+            getClickStorageKey(
+              content.slug,
+            ),
+            nextCount,
+          );
+
+          /**
+           * Open the Admin configured
+           * Smart Link immediately.
+           */
+          const opened =
+            openSmartLink(
+              smartLinkSettings.url,
+            );
+
+          /**
+           * If the browser blocks the popup,
+           * do not trap the visitor on the page
+           * forever.
+           *
+           * The counter remains recorded so the
+           * next click continues the configured cycle.
+           */
+          if (!opened) {
+            console.warn(
+              "[Smart Link] Browser blocked the Smart Link popup.",
+            );
+          }
+
+          return;
+        }
+
+        /**
+         * Threshold has been reached.
+         *
+         * This click is allowed to open the
+         * actual video normally.
+         */
+        removeStoredValue(
+          getClickStorageKey(
+            content.slug,
+          ),
+        );
+
+        removeStoredValue(
+          getThresholdStorageKey(
+            content.slug,
+          ),
+        );
+      },
+      [
+        smartLinkSettings,
+        getVideoClicks,
+        getVideoThreshold,
+        openSmartLink,
+        content.slug,
+      ],
+    );
 
   return (
     <article
@@ -216,8 +614,8 @@ export function ContentCard({
         {/**
          * Main video link.
          *
-         * Smart Link is handled by onClick.
-         * Normal navigation continues normally.
+         * Smart Link handling happens before
+         * normal navigation.
          */}
         <Link
           href={routes.content(
@@ -228,7 +626,11 @@ export function ContentCard({
           onClick={
             handleVideoClick
           }
-        />
+        >
+          <span className="sr-only">
+            Watch {content.title}
+          </span>
+        </Link>
 
         <VideoPreview
           poster={

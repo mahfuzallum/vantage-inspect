@@ -74,6 +74,7 @@ export default async function HomePage({
             <ContentListing
               dense
               columns={6}
+              monetizationPlacement="home"
               hideHeading
               eyebrow="Recordings"
               title={siteConfig.name}

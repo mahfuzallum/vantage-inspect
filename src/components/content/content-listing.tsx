@@ -22,6 +22,7 @@ import type {
   FilterKey,
 } from "@/types/discovery";
 import type { SortOption } from "@/config/filters";
+import { MonetizationSlot } from "@/components/monetization-slot";
 
 export type ContentListingProps = {
   eyebrow: string;
@@ -48,6 +49,7 @@ export type ContentListingProps = {
   emptyDescription?: string;
   dense?: boolean;
   columns?: 4 | 5 | 6 | 7;
+  monetizationPlacement?: "home" | "listing";
 };
 
 export async function ContentListing({
@@ -67,6 +69,7 @@ export async function ContentListing({
   emptyDescription,
   dense = false,
   columns = 4,
+  monetizationPlacement = "listing",
 }: ContentListingProps) {
   const filters = parseDiscoveryParams(
     searchParams,
@@ -182,6 +185,9 @@ export async function ContentListing({
             }
           />
         ) : null}
+
+        <MonetizationSlot type="nativeBanner" placement={monetizationPlacement} />
+        <MonetizationSlot type="banner" placement={monetizationPlacement} />
 
         {dense ? (
           result.items.length === 0 ? (

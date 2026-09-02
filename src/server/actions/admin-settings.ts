@@ -329,15 +329,31 @@ export async function updateHomeSettingsAction(
  *
  * Stored in site_settings through the existing settings service.
  *
- * Keys:
+ * Smart Link settings:
  *
  * smartLinkEnabled
  * smartLinkUrl
  * smartLinkTriggerCount
+ * smartLinkTriggerMode
  *
- * homeBannerEnabled
- * homeBannerImageUrl
- * homeBannerLink
+ * Advertisement settings:
+ *
+ * popunderEnabled
+ * popunderCode
+ *
+ * nativeBannerEnabled
+ * nativeBannerCode
+ * nativeBannerPlacement
+ *
+ * socialBarEnabled
+ * socialBarCode
+ *
+ * bannerEnabled
+ * bannerCode
+ * bannerPlacement
+ *
+ * bodyAdEnabled
+ * bodyAdCode
  *
  * No separate database model is required.
  */
@@ -347,92 +363,77 @@ export async function updateMonetizationSettingsAction(
 ): Promise<AdminFormState> {
   const admin = await requireAdmin();
 
-  const smartLinkEnabled =
-    formData.get(
-      "smartLinkEnabled",
-    ) === "on";
-
-  const smartLinkUrlRaw =
+  const text = (name: string) =>
     String(
-      formData.get(
-        "smartLinkUrl",
-      ) ?? "",
+      formData.get(name) ?? "",
     ).trim();
 
-  const triggerRaw =
-    String(
-      formData.get(
-        "smartLinkTriggerCount",
-      ) ?? "2",
-    ).trim();
-
-  const homeBannerEnabled =
-    formData.get(
-      "homeBannerEnabled",
-    ) === "on";
-
-  const homeBannerImageUrl =
-    String(
-      formData.get(
-        "homeBannerImageUrl",
-      ) ?? "",
-    ).trim();
-
-  const homeBannerLink =
-    String(
-      formData.get(
-        "homeBannerLink",
-      ) ?? "",
-    ).trim();
+  const checked = (name: string) =>
+    formData.get(name) === "on";
 
   const fieldErrors: Record<
     string,
     string[]
   > = {};
 
-  /*
+  /**
+   * ------------------------------------------------------------
+   * Smart Link
+   * ------------------------------------------------------------
+   */
+
+  const smartLinkUrl =
+    text("smartLinkUrl");
+
+  const triggerMode =
+    text("smartLinkTriggerMode") ||
+    "fixed";
+
+  const triggerRaw =
+    text("smartLinkTriggerCount") ||
+    "3";
+
+  /**
    * Smart Link URL validation.
-   *
-   * Empty URL is allowed when Smart Link
-   * is disabled.
    */
   if (
-    smartLinkEnabled &&
-    !smartLinkUrlRaw
+    checked("smartLinkEnabled") &&
+    !smartLinkUrl
   ) {
     fieldErrors.smartLinkUrl = [
-      "Smart Link URL is required when Smart Link is enabled.",
+      "Smart Link URL is required when enabled.",
     ];
   }
 
-  if (smartLinkUrlRaw) {
+  if (smartLinkUrl) {
     try {
-      const parsedUrl =
-        new URL(
-          smartLinkUrlRaw,
-        );
+      const u = new URL(
+        smartLinkUrl,
+      );
 
       if (
-        parsedUrl.protocol !==
-          "http:" &&
-        parsedUrl.protocol !==
-          "https:"
+        ![
+          "http:",
+          "https:",
+        ].includes(u.protocol)
       ) {
-        fieldErrors.smartLinkUrl = [
-          "Smart Link must use HTTP or HTTPS.",
-        ];
+        throw new Error();
       }
     } catch {
       fieldErrors.smartLinkUrl = [
-        "Enter a valid Smart Link URL.",
+        "Enter a valid HTTP or HTTPS URL.",
       ];
     }
   }
 
-  /*
-   * Only 1, 2 or 3 triggers are allowed.
+  /**
+   * Smart Link trigger count.
    *
-   * You can later extend this if required.
+   * 1 = first video click
+   * 2 = second video click
+   * 3 = third video click
+   * ...
+   * 20 = twentieth video click
    */
   const triggerCount =
     Number.parseInt(
@@ -445,71 +446,134 @@ export async function updateMonetizationSettingsAction(
       triggerCount,
     ) ||
     triggerCount < 1 ||
-    triggerCount > 3
+    triggerCount > 20
   ) {
     fieldErrors.smartLinkTriggerCount = [
-      "Trigger count must be 1, 2 or 3.",
+      "Trigger count must be between 1 and 20.",
     ];
   }
 
-  /*
-   * Validate banner image URL if supplied.
+  /**
+   * Smart Link trigger mode.
+   *
+   * fixed:
+   * Uses the exact trigger count.
+   *
+   * random_2_3:
+   * Uses a random trigger between 2 and 3.
+   *
+   * random_3_5:
+   * Uses a random trigger between 3 and 5.
    */
-  if (homeBannerImageUrl) {
-    try {
-      const parsedUrl =
-        new URL(
-          homeBannerImageUrl,
-        );
+  const validTriggerModes = [
+    "fixed",
+    "random_2_3",
+    "random_3_5",
+  ];
 
-      if (
-        parsedUrl.protocol !==
-          "http:" &&
-        parsedUrl.protocol !==
-          "https:"
-      ) {
-        fieldErrors.homeBannerImageUrl = [
-          "Banner image must use HTTP or HTTPS.",
-        ];
-      }
-    } catch {
-      fieldErrors.homeBannerImageUrl = [
-        "Enter a valid banner image URL.",
-      ];
-    }
+  if (
+    !validTriggerModes.includes(
+      triggerMode,
+    )
+  ) {
+    fieldErrors.smartLinkTriggerMode = [
+      "Choose a valid trigger mode.",
+    ];
   }
 
-  /*
-   * Validate banner destination URL if supplied.
+  /**
+   * ------------------------------------------------------------
+   * Advertisement placements
+   * ------------------------------------------------------------
    */
-  if (homeBannerLink) {
-    try {
-      const parsedUrl =
-        new URL(
-          homeBannerLink,
-        );
 
-      if (
-        parsedUrl.protocol !==
-          "http:" &&
-        parsedUrl.protocol !==
-          "https:"
-      ) {
-        fieldErrors.homeBannerLink = [
-          "Banner link must use HTTP or HTTPS.",
-        ];
-      }
-    } catch {
-      fieldErrors.homeBannerLink = [
-        "Enter a valid banner link.",
-      ];
-    }
+  const placements = [
+    "home",
+    "listing",
+    "video",
+  ];
+
+  const nativePlacement =
+    text(
+      "nativeBannerPlacement",
+    ) || "home";
+
+  const bannerPlacement =
+    text("bannerPlacement") ||
+    "home";
+
+  if (
+    !placements.includes(
+      nativePlacement,
+    )
+  ) {
+    fieldErrors.nativeBannerPlacement = [
+      "Choose a valid placement.",
+    ];
   }
 
   if (
+    !placements.includes(
+      bannerPlacement,
+    )
+  ) {
+    fieldErrors.bannerPlacement = [
+      "Choose a valid placement.",
+    ];
+  }
+
+  /**
+   * ------------------------------------------------------------
+   * Advertisement code validation
+   * ------------------------------------------------------------
+   */
+
+  const codeFields = [
+    [
+      "popunderCode",
+      "Popunder code",
+    ],
+    [
+      "nativeBannerCode",
+      "Native Banner code",
+    ],
+    [
+      "socialBarCode",
+      "Social Bar code",
+    ],
+    [
+      "bannerCode",
+      "Banner code",
+    ],
+    [
+      "bodyAdCode",
+      "Body Ad code",
+    ],
+  ] as const;
+
+  for (
+    const [
+      name,
+      label,
+    ] of codeFields
+  ) {
+    if (
+      text(name).length >
+      200_000
+    ) {
+      fieldErrors[name] = [
+        `${label} is too large (maximum 200,000 characters).`,
+      ];
+    }
+  }
+
+  /**
+   * Stop before saving when validation fails.
+   */
+  if (
     Object.keys(
       fieldErrors,
-    ).length > 0
+    ).length
   ) {
     return {
       status: "error",
@@ -517,55 +581,127 @@ export async function updateMonetizationSettingsAction(
     };
   }
 
-  try {
-    /*
-     * Smart Link settings.
+  /**
+   * ------------------------------------------------------------
+   * Values to save
+   * ------------------------------------------------------------
+   */
+
+  const values: Record<
+    string,
+    unknown
+  > = {
+    /**
+     * Smart Link
      */
-    await upsertSetting(
-      "smartLinkEnabled",
-      smartLinkEnabled,
-      "monetization",
-    );
+    smartLinkEnabled:
+      checked(
+        "smartLinkEnabled",
+      ),
 
-    await upsertSetting(
-      "smartLinkUrl",
-      smartLinkUrlRaw || null,
-      "monetization",
-    );
+    smartLinkUrl:
+      smartLinkUrl || null,
 
-    await upsertSetting(
-      "smartLinkTriggerCount",
+    smartLinkTriggerCount:
       triggerCount,
-      "monetization",
-    );
 
-    /*
-     * Home background banner settings.
+    smartLinkTriggerMode:
+      triggerMode,
+
+    /**
+     * Popunder
      */
-    await upsertSetting(
-      "homeBannerEnabled",
-      homeBannerEnabled,
-      "monetization",
-    );
+    popunderEnabled:
+      checked(
+        "popunderEnabled",
+      ),
 
-    await upsertSetting(
-      "homeBannerImageUrl",
-      homeBannerImageUrl || null,
-      "monetization",
-    );
+    popunderCode:
+      text(
+        "popunderCode",
+      ) || null,
 
-    await upsertSetting(
-      "homeBannerLink",
-      homeBannerLink || null,
-      "monetization",
-    );
-
-    /*
-     * Never record the actual Smart Link URL
-     * or banner URLs in the audit log.
-     *
-     * Only record which configuration group changed.
+    /**
+     * Native Banner
      */
+    nativeBannerEnabled:
+      checked(
+        "nativeBannerEnabled",
+      ),
+
+    nativeBannerCode:
+      text(
+        "nativeBannerCode",
+      ) || null,
+
+    nativeBannerPlacement:
+      nativePlacement,
+
+    /**
+     * Social Bar
+     */
+    socialBarEnabled:
+      checked(
+        "socialBarEnabled",
+      ),
+
+    socialBarCode:
+      text(
+        "socialBarCode",
+      ) || null,
+
+    /**
+     * Banner
+     */
+    bannerEnabled:
+      checked(
+        "bannerEnabled",
+      ),
+
+    bannerCode:
+      text(
+        "bannerCode",
+      ) || null,
+
+    bannerPlacement:
+      bannerPlacement,
+
+    /**
+     * Body Ad
+     */
+    bodyAdEnabled:
+      checked(
+        "bodyAdEnabled",
+      ),
+
+    bodyAdCode:
+      text(
+        "bodyAdCode",
+      ) || null,
+  };
+
+  /**
+   * ------------------------------------------------------------
+   * Save settings
+   * ------------------------------------------------------------
+   */
+
+  try {
+    for (
+      const [
+        key,
+        value,
+      ] of Object.entries(
+        values,
+      )
+    ) {
+      await upsertSetting(
+        key,
+        value,
+        "monetization",
+      );
+    }
+
     await recordAudit({
       actorId: admin.id,
       action:
@@ -574,14 +710,10 @@ export async function updateMonetizationSettingsAction(
       entityId:
         "monetization",
       metadata: {
-        keys: [
-          "smartLinkEnabled",
-          "smartLinkUrl",
-          "smartLinkTriggerCount",
-          "homeBannerEnabled",
-          "homeBannerImageUrl",
-          "homeBannerLink",
-        ],
+        keys:
+          Object.keys(
+            values,
+          ),
       },
     });
   } catch (error) {
@@ -597,11 +729,13 @@ export async function updateMonetizationSettingsAction(
     };
   }
 
-  /*
-   * Revalidate all pages that can display
-   * the Smart Link/banner configuration.
+  /**
+   * Revalidate affected pages.
    */
-  revalidatePath(routes.home);
+  revalidatePath(
+    routes.home,
+  );
+
   revalidatePath(
     routes.admin.settings,
   );
@@ -644,21 +778,26 @@ export async function updateUnlockCodeAction(
     return {
       status: "error",
       fieldErrors:
-        fieldErrorsFrom(parsed.error),
+        fieldErrorsFrom(
+          parsed.error,
+        ),
     };
   }
 
   try {
     const existing =
-      await db.siteSetting.findUnique({
-        where: {
-          key: "adminUnlockCode",
-        },
+      await db.siteSetting.findUnique(
+        {
+          where: {
+            key:
+              "adminUnlockCode",
+          },
 
-        select: {
-          value: true,
+          select: {
+            value: true,
+          },
         },
-      });
+      );
 
     const currentHash =
       typeof existing?.value ===
@@ -670,7 +809,8 @@ export async function updateUnlockCodeAction(
       const valid =
         await verifyPassword(
           parsed.data
-            .currentCode ?? "",
+            .currentCode ??
+            "",
           currentHash,
         );
 

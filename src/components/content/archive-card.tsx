@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { SmartLinkAnchor } from "./smart-link-anchor";
 import { Bookmark, Eye, ThumbsUp } from "lucide-react";
 import { VideoPreview } from "./video-preview";
 import { routes } from "@/config/routes";
@@ -176,7 +177,7 @@ export function ArchiveCard({
         ) : null}
 
         {/* Video link */}
-        <Link
+        <SmartLinkAnchor
           href={href}
           prefetch
           aria-label={`Open ${content.title}`}
@@ -201,7 +202,7 @@ export function ArchiveCard({
           <span className="sr-only">
             {content.title}
           </span>
-        </Link>
+        </SmartLinkAnchor>
       </div>
 
       {/* Information */}
@@ -219,7 +220,7 @@ export function ArchiveCard({
         "
       >
         {/* Title */}
-        <Link
+        <SmartLinkAnchor
           href={href}
           prefetch
           title={content.title}
@@ -237,7 +238,7 @@ export function ArchiveCard({
           "
         >
           {content.title}
-        </Link>
+        </SmartLinkAnchor>
 
         {/* Creator */}
         {content.creator ? (

@@ -26,6 +26,7 @@ import { formatCount, formatDate, formatDuration, pluralize } from "@/lib/utils/
 import { absoluteUrl, buildMetadata } from "@/lib/seo/metadata";
 import { breadcrumbJsonLd, jsonLdScript, videoObjectJsonLd } from "@/lib/seo/structured-data";
 import { routes } from "@/config/routes";
+import { MonetizationSlot } from "@/components/monetization-slot";
 
 type Props = {
   params: Promise<{ slug: string }>;
@@ -147,6 +148,9 @@ export default async function ContentDetailPage({ params, searchParams }: Props)
             title={content.title}
           />
         )}
+
+        <MonetizationSlot type="nativeBanner" placement="video" />
+        <MonetizationSlot type="banner" placement="video" />
 
         <div className="mt-6 grid gap-10 lg:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="min-w-0 space-y-6">

@@ -15,6 +15,7 @@ import { buildUrl } from "@/lib/utils/url";
 import { normalizeQuery } from "@/lib/security/sanitize";
 import { buildMetadata } from "@/lib/seo/metadata";
 import { routes } from "@/config/routes";
+import { MonetizationSlot } from "@/components/monetization-slot";
 
 type Props = { searchParams: Promise<Record<string, string | string[] | undefined>> };
 
@@ -91,6 +92,8 @@ export default async function SearchPage({ searchParams }: Props) {
           <EmptySearchState />
         ) : (
           <>
+            <MonetizationSlot type="nativeBanner" placement="listing" />
+            <MonetizationSlot type="banner" placement="listing" />
             <FilterBar
               className="mb-6"
               filters={filters}

@@ -20,6 +20,23 @@ export type SettingsGroup =
   | "monetization";
 
 /**
+ * Smart Link trigger modes.
+ *
+ * fixed:
+ *   Uses the exact configured trigger count.
+ *
+ * random_2_3:
+ *   Randomly selects 2 or 3 Smart Link triggers.
+ *
+ * random_3_5:
+ *   Randomly selects 3, 4 or 5 Smart Link triggers.
+ */
+export type SmartLinkTriggerMode =
+  | "fixed"
+  | "random_2_3"
+  | "random_3_5";
+
+/**
  * Defaults for the home page.
  *
  * These were literals inside the hero and the page. Keeping them here means a
@@ -52,20 +69,81 @@ export const HOME_DEFAULTS = {
  *   Optional background/banner advertising on the home page.
  */
 export const MONETIZATION_DEFAULTS = {
+  /**
+   * Smart Link
+   */
   smartLinkEnabled: false,
 
   smartLinkUrl: "",
 
-  /*
-   * Allowed values in the admin UI are 1, 2 or 3.
-   * Default is 2.
+  /**
+   * Number of Smart Link triggers.
+   *
+   * Supported values: 1 through 20.
    */
-  smartLinkTriggerCount: 2,
+  smartLinkTriggerCount: 3,
 
+  /**
+   * Trigger mode.
+   *
+   * fixed:
+   *   Exact configured number.
+   *
+   * random_2_3:
+   *   Randomly 2 or 3.
+   *
+   * random_3_5:
+   *   Randomly 3, 4 or 5.
+   */
+  smartLinkTriggerMode:
+    "fixed" as SmartLinkTriggerMode,
+
+  /**
+   * Popunder
+   */
+  popunderEnabled: false,
+  popunderCode: "",
+
+  /**
+   * Native Banner
+   */
+  nativeBannerEnabled: false,
+  nativeBannerCode: "",
+  nativeBannerPlacement:
+    "home" as
+      | "home"
+      | "listing"
+      | "video",
+
+  /**
+   * Social Bar
+   */
+  socialBarEnabled: false,
+  socialBarCode: "",
+
+  /**
+   * Banner
+   */
+  bannerEnabled: false,
+  bannerCode: "",
+  bannerPlacement:
+    "home" as
+      | "home"
+      | "listing"
+      | "video",
+
+  /**
+   * Body Ad
+   */
+  bodyAdEnabled: false,
+  bodyAdCode: "",
+
+  /**
+   * Existing home-banner settings are preserved
+   * for backwards compatibility.
+   */
   homeBannerEnabled: false,
-
   homeBannerImageUrl: "",
-
   homeBannerLink: "",
 };
 
@@ -148,10 +226,134 @@ export const getSettings = unstable_cache(
     /**
      * Monetization settings.
      */
-    if (group === "monetization") {
-      return {
+    if (
+      group ===
+      "monetization"
+    ) {
+      /**
+       * Start with safe defaults.
+       */
+      const settings = {
         ...MONETIZATION_DEFAULTS,
         ...values,
+      };
+
+      /**
+       * Normalize Smart Link trigger count.
+       *
+       * Older installations may have:
+       * - no value
+       * - invalid value
+       * - a string value
+       *
+       * Keep the public runtime safe by always
+       * returning a number between 1 and 20.
+       */
+      const parsedCount =
+        Number(
+          settings.smartLinkTriggerCount,
+        );
+
+      const triggerCount =
+        Number.isInteger(
+          parsedCount,
+        ) &&
+        parsedCount >= 1 &&
+        parsedCount <= 20
+          ? parsedCount
+          : MONETIZATION_DEFAULTS.smartLinkTriggerCount;
+
+      /**
+       * Normalize Smart Link trigger mode.
+       */
+      const rawMode =
+        String(
+          settings.smartLinkTriggerMode ??
+            "",
+        );
+
+      const triggerMode: SmartLinkTriggerMode =
+        rawMode ===
+          "random_2_3" ||
+        rawMode ===
+          "random_3_5"
+          ? rawMode
+          : "fixed";
+
+      return {
+        ...settings,
+
+        smartLinkEnabled:
+          Boolean(
+            settings.smartLinkEnabled,
+          ),
+
+        smartLinkUrl:
+          String(
+            settings.smartLinkUrl ??
+              "",
+          ),
+
+        smartLinkTriggerCount:
+          triggerCount,
+
+        smartLinkTriggerMode:
+          triggerMode,
+
+        popunderEnabled:
+          Boolean(
+            settings.popunderEnabled,
+          ),
+
+        popunderCode:
+          String(
+            settings.popunderCode ??
+              "",
+          ),
+
+        nativeBannerEnabled:
+          Boolean(
+            settings.nativeBannerEnabled,
+          ),
+
+        nativeBannerCode:
+          String(
+            settings.nativeBannerCode ??
+              "",
+          ),
+
+        socialBarEnabled:
+          Boolean(
+            settings.socialBarEnabled,
+          ),
+
+        socialBarCode:
+          String(
+            settings.socialBarCode ??
+              "",
+          ),
+
+        bannerEnabled:
+          Boolean(
+            settings.bannerEnabled,
+          ),
+
+        bannerCode:
+          String(
+            settings.bannerCode ??
+              "",
+          ),
+
+        bodyAdEnabled:
+          Boolean(
+            settings.bodyAdEnabled,
+          ),
+
+        bodyAdCode:
+          String(
+            settings.bodyAdCode ??
+              "",
+          ),
       };
     }
 
