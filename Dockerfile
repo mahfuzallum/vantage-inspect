@@ -22,4 +22,4 @@ RUN npm run build
 
 EXPOSE 3000
 
-CMD ["sh", "-c", "npm run next:start & exec npm run worker"]
+CMD ["sh", "-c", "npm run worker & exec npm run next:start"]
