@@ -4,6 +4,8 @@ import { SiteFooter } from "@/components/layout/site-footer";
 import { AmbientBackground } from "@/components/layout/ambient-background";
 import { MonetizationRuntime } from "@/components/monetization-runtime";
 
+export const dynamic = "force-dynamic";
+
 /** Chrome shared by every public page. */
 export default function SiteLayout({ children }: { children: ReactNode }) {
   return (
