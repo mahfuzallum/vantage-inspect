@@ -24,8 +24,7 @@ import {
   reclaimStalledJobs,
 } from "./queue";
 
-import { S3MediaProvider } from "@/lib/media/s3-provider";
-import { LocalMediaProvider } from "@/lib/media/local-provider";
+import { getConfiguredMediaProvider, getMediaProviderForAsset } from "@/server/services/storage-service";
 import { storagePaths } from "@/lib/media/paths";
 import type { StoredObject } from "@/lib/media/types";
 
@@ -87,6 +86,10 @@ function safeMessage(
   return "Unknown processing error.";
 }
 
+type S3DownloadCapable = {
+  downloadToFile: (object: { bucket?: string | null; objectKey: string }, filePath: string) => Promise<void>;
+};
+
 type Uploader = {
   putFile(
     key: string,
@@ -101,11 +104,8 @@ type Uploader = {
   ): Promise<StoredObject>;
 };
 
-function uploader(): Uploader {
-  return serverEnv()
-    .MEDIA_PROVIDER === "s3"
-    ? (new S3MediaProvider() as unknown as Uploader)
-    : (new LocalMediaProvider() as unknown as Uploader);
+async function uploader(): Promise<Uploader> {
+  return (await getConfiguredMediaProvider()) as Uploader;
 }
 
 /**
@@ -234,6 +234,10 @@ export async function runOneJob(
             select: {
               objectKey: true,
               provider: true,
+              bucket: true,
+              url: true,
+              mimeType: true,
+              sizeBytes: true,
             },
           },
         },
@@ -250,22 +254,26 @@ export async function runOneJob(
     }
 
     /*
-     * Local storage source.
+     * Resolve the source from its original storage backend. S3-compatible
+     * sources are downloaded to the local FFmpeg scratch area first.
      */
-    const localSource =
-      path.join(
-        env.MEDIA_LOCAL_ROOT,
-        sourceKey,
-      );
-
-    await stat(
-      localSource,
-    ).catch(() => {
-      throw new FfmpegError(
-        "The source file could not be found in storage.",
-        sourceKey,
-      );
-    });
+    const localSource = path.join(env.MEDIA_LOCAL_ROOT, sourceKey);
+    if (content?.source?.provider === "S3") {
+      const sourceProvider = await getMediaProviderForAsset(content.source);
+      const downloadToFile = (sourceProvider as S3DownloadCapable).downloadToFile;
+      if (!downloadToFile) {
+        throw new Error("The configured S3 storage cannot download source files.");
+      }
+      await mkdir(path.dirname(localSource), { recursive: true });
+      await downloadToFile.call(sourceProvider, { bucket: content.source.bucket, objectKey: sourceKey }, localSource);
+    } else {
+      await stat(localSource).catch(() => {
+        throw new FfmpegError(
+          "The source file could not be found in storage.",
+          sourceKey,
+        );
+      });
+    }
 
     /*
      * Prepare worker directory.
@@ -297,7 +305,7 @@ export async function runOneJob(
       );
 
     const store =
-      uploader();
+      await uploader();
 
     /*
      * -------------------------------------------------

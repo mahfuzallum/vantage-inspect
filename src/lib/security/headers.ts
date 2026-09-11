@@ -1,7 +1,7 @@
 /**
  * Response headers applied to every route via next.config.ts.
- * CSP is intentionally strict; `unsafe-inline` for styles is required by
- * Next's runtime style injection and is the only relaxation.
+ * CSP stays restrictive while allowing trusted third-party monetization scripts
+ * configured by an administrator.
  */
 export function securityHeaders(): Array<{ key: string; value: string }> {
   const isDev = process.env.NODE_ENV === "development";

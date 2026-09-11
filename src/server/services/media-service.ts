@@ -1,6 +1,7 @@
 import "server-only";
 import { db } from "@/lib/db";
 import { mediaProvider } from "@/lib/media";
+import { getConfiguredMediaProvider, getMediaProviderForAsset } from "@/server/services/storage-service";
 import { storagePaths } from "@/lib/media/paths";
 import { sanitizeFilename } from "@/lib/media/image-validation";
 import { randomToken } from "@/lib/utils/hash";
@@ -53,7 +54,7 @@ export async function authorizeDirectUpload(params: {
   extension: string;
   maxSizeBytes: number;
 }): Promise<{ authorization: PresignedUpload; objectKey: string } | null> {
-  const provider = mediaProvider();
+  const provider = await getConfiguredMediaProvider();
   if (!provider.createUploadAuthorization) return null;
 
   const objectKey = keyForTarget(params.target, params.extension);
@@ -84,7 +85,7 @@ export async function recordUploadedAsset(params: {
   height?: number | null;
   durationSeconds?: number | null;
 }): Promise<{ id: string; sizeBytes: number } | null> {
-  const provider = mediaProvider();
+  const provider = await getConfiguredMediaProvider();
 
   const metadata: ObjectMetadata | null = await provider.getMetadata({
     provider: provider.id,
@@ -185,14 +186,14 @@ export async function deleteAsset(
   // External assets have no bytes of ours to remove.
   if (asset.provider !== "EXTERNAL" && asset.objectKey) {
     try {
-      await mediaProvider().delete({
+      await getMediaProviderForAsset(asset).then((provider) => provider.delete({
         provider: asset.provider,
         bucket: asset.bucket,
         objectKey: asset.objectKey,
         url: asset.url,
         mimeType: asset.mimeType,
         sizeBytes: null,
-      });
+      }));
     } catch (error) {
       console.error(`[media] storage delete failed for ${assetId}:`, error);
       return {
@@ -274,8 +275,6 @@ export async function findOrphanedMedia(limit = 200): Promise<OrphanReport> {
 
   const unreferencedRecords: OrphanReport["unreferencedRecords"] = [];
   const missingObjects: OrphanReport["missingObjects"] = [];
-  const provider = mediaProvider();
-
   for (const asset of assets) {
     const references =
       asset._count.thumbnailFor +
@@ -294,6 +293,7 @@ export async function findOrphanedMedia(limit = 200): Promise<OrphanReport> {
     }
 
     if (asset.provider !== "EXTERNAL" && asset.objectKey) {
+      const provider = await getMediaProviderForAsset(asset);
       const present = await provider.exists({
         provider: asset.provider,
         bucket: asset.bucket,

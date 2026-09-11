@@ -6,7 +6,7 @@ export async function MonetizationRuntime() {
   return (
     <>
       {Boolean(s.popunderEnabled && typeof s.popunderCode === "string" && s.popunderCode.trim()) ? (
-        <MonetizationCode code={String(s.popunderCode)} />
+        <MonetizationCode code={String(s.popunderCode)} target="head" />
       ) : null}
       {Boolean(s.socialBarEnabled && typeof s.socialBarCode === "string" && s.socialBarCode.trim()) ? (
         <MonetizationCode code={String(s.socialBarCode)} />

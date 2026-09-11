@@ -7,6 +7,7 @@ import { safeExternalUrl } from "@/lib/security/sanitize";
 
 import { LocalMediaProvider } from "./local-provider";
 import { S3MediaProvider } from "./s3-provider";
+import { getMediaProviderForAsset } from "@/server/services/storage-service";
 
 import type {
   MediaStorageProvider,
@@ -114,10 +115,10 @@ export async function resolveAssetUrl(
    * Resolve LOCAL or S3 storage through the configured provider.
    */
   const resolved =
-    await mediaProvider().resolveUrl(
+    await getMediaProviderForAsset(storedObject).then((provider) => provider.resolveUrl(
       storedObject,
       options,
-    );
+    ));
 
   return resolved || null;
 }
@@ -136,7 +137,7 @@ export async function deleteAsset(
     return;
   }
 
-  await mediaProvider().delete(
+  await getMediaProviderForAsset(asset).then((provider) => provider.delete(
     toStoredObject(asset),
-  );
+  ));
 }

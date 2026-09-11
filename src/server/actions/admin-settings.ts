@@ -22,6 +22,12 @@ import {
 } from "@/lib/auth/password";
 
 import { routes } from "@/config/routes";
+import {
+  saveStorageProfile,
+  testStorageProfile,
+  setActiveStorageProfile,
+  deleteStorageProfile,
+} from "@/server/services/storage-service";
 import type { AdminFormState } from "./admin-content";
 
 /**
@@ -868,4 +874,91 @@ export async function updateUnlockCodeAction(
     message:
       "Unlock code updated.",
   };
+}
+
+/** Storage profile management. */
+export async function saveStorageProfileAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  const admin = await requireAdmin();
+  try {
+    const type = formData.get("type") === "local" ? "local" : "s3";
+    const id = String(formData.get("id") ?? "").trim() || undefined;
+    const name = String(formData.get("name") ?? "").trim();
+    if (!name) return { status: "error", message: "Give this storage a name." };
+    await saveStorageProfile({
+      id, name, type,
+      endpoint: String(formData.get("endpoint") ?? ""),
+      region: String(formData.get("region") ?? "auto"),
+      bucket: String(formData.get("bucket") ?? ""),
+      accessKey: String(formData.get("accessKey") ?? ""),
+      secretKey: String(formData.get("secretKey") ?? ""),
+      publicUrl: String(formData.get("publicUrl") ?? ""),
+      forcePathStyle: formData.get("forcePathStyle") === "on",
+      enabled: formData.get("enabled") !== "off",
+      makeActive: formData.get("makeActive") === "on",
+    });
+    await recordAudit({ actorId: admin.id, action: AUDIT_ACTIONS.SETTINGS_CHANGED, entityType: "storage", entityId: id ?? "new", metadata: { action: id ? "updated" : "created" } });
+    revalidatePath(routes.admin.settings);
+    return { status: "success", message: "Storage saved." };
+  } catch (error) {
+    console.error("[admin] storage save failed:", error);
+    return { status: "error", message: error instanceof Error ? error.message : "Storage could not be saved." };
+  }
+}
+
+export async function testStorageProfileAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  await requireAdmin();
+  try {
+    await testStorageProfile({
+      type: formData.get("type") === "local" ? "local" : "s3",
+      endpoint: String(formData.get("endpoint") ?? ""),
+      region: String(formData.get("region") ?? "auto"),
+      bucket: String(formData.get("bucket") ?? ""),
+      accessKey: String(formData.get("accessKey") ?? ""),
+      secretKey: String(formData.get("secretKey") ?? ""),
+      publicUrl: String(formData.get("publicUrl") ?? ""),
+      forcePathStyle: formData.get("forcePathStyle") === "on",
+    });
+    return { status: "success", message: "Connection successful." };
+  } catch (error) {
+    console.error("[admin] storage test failed:", error);
+    return { status: "error", message: error instanceof Error ? error.message : "Connection failed." };
+  }
+}
+
+export async function activateStorageProfileAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  const admin = await requireAdmin();
+  try {
+    const id = String(formData.get("id") ?? "");
+    await setActiveStorageProfile(id);
+    await recordAudit({ actorId: admin.id, action: AUDIT_ACTIONS.SETTINGS_CHANGED, entityType: "storage", entityId: id, metadata: { action: "activated" } });
+    revalidatePath(routes.admin.settings);
+    return { status: "success", message: "Storage activated." };
+  } catch (error) {
+    return { status: "error", message: error instanceof Error ? error.message : "Storage could not be activated." };
+  }
+}
+
+export async function deleteStorageProfileAction(
+  _previous: AdminFormState,
+  formData: FormData,
+): Promise<AdminFormState> {
+  const admin = await requireAdmin();
+  try {
+    const id = String(formData.get("id") ?? "");
+    await deleteStorageProfile(id);
+    await recordAudit({ actorId: admin.id, action: AUDIT_ACTIONS.SETTINGS_CHANGED, entityType: "storage", entityId: id, metadata: { action: "deleted" } });
+    revalidatePath(routes.admin.settings);
+    return { status: "success", message: "Storage deleted." };
+  } catch (error) {
+    return { status: "error", message: error instanceof Error ? error.message : "Storage could not be deleted." };
+  }
 }

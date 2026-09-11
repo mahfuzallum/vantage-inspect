@@ -17,7 +17,8 @@ export type SettingsGroup =
   | "features"
   | "home"
   | "security"
-  | "monetization";
+  | "monetization"
+  | "storage";
 
 /**
  * Smart Link trigger modes.
