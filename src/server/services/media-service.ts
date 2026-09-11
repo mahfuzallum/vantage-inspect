@@ -1,6 +1,5 @@
 import "server-only";
 import { db } from "@/lib/db";
-import { mediaProvider } from "@/lib/media";
 import { getConfiguredMediaProvider, getMediaProviderForAsset } from "@/server/services/storage-service";
 import { storagePaths } from "@/lib/media/paths";
 import { sanitizeFilename } from "@/lib/media/image-validation";
@@ -135,6 +134,7 @@ export async function recordExternalAsset(params: {
     },
     select: { id: true },
   });
+
   return asset.id;
 }
 
@@ -144,14 +144,25 @@ export async function referenceCount(assetId: string): Promise<number> {
     where: { id: assetId },
     select: {
       _count: {
-        select: { thumbnailFor: true, sourceFor: true, creatorAvatars: true, creatorBanners: true },
+        select: {
+          thumbnailFor: true,
+          sourceFor: true,
+          creatorAvatars: true,
+          creatorBanners: true,
+        },
       },
     },
   });
+
   if (!asset) return 0;
 
   const counts = asset._count;
-  return counts.thumbnailFor + counts.sourceFor + counts.creatorAvatars + counts.creatorBanners;
+  return (
+    counts.thumbnailFor +
+    counts.sourceFor +
+    counts.creatorAvatars +
+    counts.creatorBanners
+  );
 }
 
 export type DeletionOutcome =
@@ -174,8 +185,16 @@ export async function deleteAsset(
 ): Promise<DeletionOutcome> {
   const asset = await db.mediaAsset.findUnique({
     where: { id: assetId },
-    select: { id: true, provider: true, bucket: true, objectKey: true, url: true, mimeType: true },
+    select: {
+      id: true,
+      provider: true,
+      bucket: true,
+      objectKey: true,
+      url: true,
+      mimeType: true,
+    },
   });
+
   if (!asset) return { status: "missing" };
 
   const references = await referenceCount(assetId);
@@ -186,19 +205,22 @@ export async function deleteAsset(
   // External assets have no bytes of ours to remove.
   if (asset.provider !== "EXTERNAL" && asset.objectKey) {
     try {
-      await getMediaProviderForAsset(asset).then((provider) => provider.delete({
-        provider: asset.provider,
-        bucket: asset.bucket,
-        objectKey: asset.objectKey,
-        url: asset.url,
-        mimeType: asset.mimeType,
-        sizeBytes: null,
-      }));
+      await getMediaProviderForAsset(asset).then((provider) =>
+        provider.delete({
+          provider: asset.provider,
+          bucket: asset.bucket,
+          objectKey: asset.objectKey,
+          url: asset.url,
+          mimeType: asset.mimeType,
+          sizeBytes: null,
+        }),
+      );
     } catch (error) {
       console.error(`[media] storage delete failed for ${assetId}:`, error);
       return {
         status: "storage-failed",
-        message: "The stored file could not be removed. The record was kept so it is not lost.",
+        message:
+          "The stored file could not be removed. The record was kept so it is not lost.",
       };
     }
   }
@@ -221,8 +243,12 @@ export async function replaceAsset(params: {
 }): Promise<void> {
   await params.attach(params.newAssetId);
 
-  if (params.previousAssetId && params.previousAssetId !== params.newAssetId) {
+  if (
+    params.previousAssetId &&
+    params.previousAssetId !== params.newAssetId
+  ) {
     const outcome = await deleteAsset(params.previousAssetId);
+
     if (outcome.status === "detached") {
       console.info(
         `[media] previous asset ${params.previousAssetId} kept: ${outcome.remainingReferences} reference(s) remain`,
@@ -240,8 +266,13 @@ export type OrphanReport = {
     sizeBytes: number | null;
     createdAt: Date;
   }>;
+
   /** Rows whose object is no longer present in storage. */
-  missingObjects: Array<{ id: string; objectKey: string | null }>;
+  missingObjects: Array<{
+    id: string;
+    objectKey: string | null;
+  }>;
+
   scanned: number;
 };
 
@@ -253,7 +284,9 @@ export type OrphanReport = {
  * automatic sweep would quietly destroy real work. A human reviews the list
  * and acts on it from the admin page.
  */
-export async function findOrphanedMedia(limit = 200): Promise<OrphanReport> {
+export async function findOrphanedMedia(
+  limit = 200,
+): Promise<OrphanReport> {
   const assets = await db.mediaAsset.findMany({
     orderBy: { createdAt: "desc" },
     take: limit,
@@ -268,13 +301,19 @@ export async function findOrphanedMedia(limit = 200): Promise<OrphanReport> {
       sizeBytes: true,
       createdAt: true,
       _count: {
-        select: { thumbnailFor: true, sourceFor: true, creatorAvatars: true, creatorBanners: true },
+        select: {
+          thumbnailFor: true,
+          sourceFor: true,
+          creatorAvatars: true,
+          creatorBanners: true,
+        },
       },
     },
   });
 
   const unreferencedRecords: OrphanReport["unreferencedRecords"] = [];
   const missingObjects: OrphanReport["missingObjects"] = [];
+
   for (const asset of assets) {
     const references =
       asset._count.thumbnailFor +
@@ -294,6 +333,7 @@ export async function findOrphanedMedia(limit = 200): Promise<OrphanReport> {
 
     if (asset.provider !== "EXTERNAL" && asset.objectKey) {
       const provider = await getMediaProviderForAsset(asset);
+
       const present = await provider.exists({
         provider: asset.provider,
         bucket: asset.bucket,
@@ -302,9 +342,19 @@ export async function findOrphanedMedia(limit = 200): Promise<OrphanReport> {
         mimeType: asset.mimeType,
         sizeBytes: asset.sizeBytes,
       });
-      if (!present) missingObjects.push({ id: asset.id, objectKey: asset.objectKey });
+
+      if (!present) {
+        missingObjects.push({
+          id: asset.id,
+          objectKey: asset.objectKey,
+        });
+      }
     }
   }
 
-  return { unreferencedRecords, missingObjects, scanned: assets.length };
+  return {
+    unreferencedRecords,
+    missingObjects,
+    scanned: assets.length,
+  };
 }
