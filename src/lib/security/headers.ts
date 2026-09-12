@@ -8,7 +8,7 @@ export function securityHeaders(): Array<{ key: string; value: string }> {
 
   const csp = [
     "default-src 'self'",
-    `script-src 'self' ${isDev ? "'unsafe-eval'" : ""} 'unsafe-inline'`.trim(),
+    `script-src 'self' https://pl28833114.profitableratecpmnetwork.com ${isDev ? "'unsafe-eval'" : ""} 'unsafe-inline'`.trim(),
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob: https:",
     "media-src 'self' blob: https:",
