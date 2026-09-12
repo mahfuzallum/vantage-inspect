@@ -157,8 +157,7 @@ export class S3MediaProvider implements MediaStorageProvider {
   }
 
   /** Removes every object under a prefix, a page at a time. */
-  async deletePrefix(prefix: string): Promise<number> {
-    let removed = 0;
+  async deletePrefix(prefix: string): Promise<void> {
     let token: string | undefined;
 
     do {
@@ -181,13 +180,10 @@ export class S3MediaProvider implements MediaStorageProvider {
             Delete: { Objects: keys.map((Key) => ({ Key })) },
           }),
         );
-        removed += keys.length;
       }
 
       token = listed.IsTruncated ? listed.NextContinuationToken : undefined;
     } while (token);
-
-    return removed;
   }
 
   /**

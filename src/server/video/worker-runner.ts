@@ -105,7 +105,7 @@ type Uploader = {
 };
 
 async function uploader(): Promise<Uploader> {
-  return (await getConfiguredMediaProvider()) as Uploader;
+  return (await getConfiguredMediaProvider()) as unknown as Uploader;
 }
 
 /**
@@ -260,7 +260,7 @@ export async function runOneJob(
     const localSource = path.join(env.MEDIA_LOCAL_ROOT, sourceKey);
     if (content?.source?.provider === "S3") {
       const sourceProvider = await getMediaProviderForAsset(content.source);
-      const downloadToFile = (sourceProvider as S3DownloadCapable).downloadToFile;
+      const downloadToFile = (sourceProvider as unknown as S3DownloadCapable).downloadToFile;
       if (!downloadToFile) {
         throw new Error("The configured S3 storage cannot download source files.");
       }
