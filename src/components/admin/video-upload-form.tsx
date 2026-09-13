@@ -56,36 +56,33 @@ function formatBytes(bytes: number): string {
   let value = bytes;
   let unit = 0;
 
-  while (
-    value >= 1024 &&
-    unit < units.length - 1
-  ) {
+  while (value >= 1024 && unit < units.length - 1) {
     value /= 1024;
     unit += 1;
   }
 
-  return `${value.toFixed(
-    unit === 0 ? 0 : 1,
-  )} ${units[unit]}`;
+  return `${value.toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+/**
+ * Creates a clean, predictable SEO-friendly title.
+ *
+ * Example:
+ * Winterforu Webcam Video 01
+ * Winterforu Webcam Video 02
+ */
 function suggestedTitle(
   creatorName: string,
   index: number,
 ): string {
-  const cleanCreator =
-    creatorName
-      .replace(/\s+/g, " ")
-      .trim();
+  const cleanCreator = creatorName
+    .replace(/\s+/g, " ")
+    .trim();
 
-  return `${cleanCreator} Webcam Video ${String(
-    index,
-  ).padStart(2, "0")}`;
+  return `${cleanCreator} Webcam Video ${String(index).padStart(2, "0")}`;
 }
 
-function getFileExtension(
-  file: File,
-): string {
+function getFileExtension(file: File): string {
   return (
     file.name
       .split(".")
@@ -102,8 +99,7 @@ export function VideoUploadForm({
 }: VideoUploadFormProps) {
   const router = useRouter();
 
-  const inputRef =
-    useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   const requestRefs = useRef(
     new Map<string, XMLHttpRequest>(),
@@ -112,8 +108,7 @@ export function VideoUploadForm({
   const [creator, setCreator] =
     useState<CreatorOption | null>(null);
 
-  const [files, setFiles] =
-    useState<UploadItem[]>([]);
+  const [files, setFiles] = useState<UploadItem[]>([]);
 
   const [categoryId, setCategoryId] =
     useState("");
@@ -123,6 +118,9 @@ export function VideoUploadForm({
 
   const [summary, setSummary] =
     useState("");
+
+  const [uploadMode, setUploadMode] =
+    useState<UploadMode>("upload");
 
   const [uploading, setUploading] =
     useState(false);
@@ -136,23 +134,18 @@ export function VideoUploadForm({
   const [dragging, setDragging] =
     useState(false);
 
-  const accept =
-    acceptedExtensions
-      .map(
-        (extension) =>
-          `.${extension}`,
-      )
-      .join(",");
+  const accept = acceptedExtensions
+    .map((extension) => `.${extension}`)
+    .join(",");
 
   const maxBytes =
     maxUploadMb * 1024 * 1024;
 
-  function addFiles(
-    nextFiles: File[],
-  ) {
-    if (nextFiles.length === 0) {
-      return;
-    }
+  /**
+   * Add one or many video files.
+   */
+  function addFiles(nextFiles: File[]) {
+    if (nextFiles.length === 0) return;
 
     const nextErrors: Record<
       string,
@@ -174,14 +167,12 @@ export function VideoUploadForm({
           `That file type isn't accepted. Use ${acceptedExtensions.join(
             ", ",
           )}.`;
-
         continue;
       }
 
       if (file.size <= 0) {
         nextErrors.file =
           `${file.name} is empty.`;
-
         continue;
       }
 
@@ -190,69 +181,54 @@ export function VideoUploadForm({
           `${file.name} is ${formatBytes(
             file.size,
           )}. The limit is ${maxUploadMb}MB.`;
-
         continue;
       }
 
-      const duplicate =
-        files.some(
-          (item) =>
-            item.file.name ===
-              file.name &&
-            item.file.size ===
-              file.size &&
-            item.file
-              .lastModified ===
-              file.lastModified,
-        );
+      const duplicate = files.some(
+        (item) =>
+          item.file.name === file.name &&
+          item.file.size === file.size &&
+          item.file.lastModified ===
+            file.lastModified,
+      );
 
-      if (duplicate) {
-        continue;
-      }
+      if (duplicate) continue;
 
       validFiles.push(file);
     }
 
     setErrors(nextErrors);
 
-    if (validFiles.length === 0) {
+    if (
+      validFiles.length === 0 ||
+      !creator
+    ) {
       return;
     }
 
     setFiles((previous) => {
-      const startIndex =
-        previous.length;
+      const startIndex = previous.length;
 
       const newItems: UploadItem[] =
-        validFiles.map(
-          (file, index) => ({
-            id: [
-              file.name,
-              file.size,
-              file.lastModified,
-              Date.now(),
-              index,
-            ].join("-"),
+        validFiles.map((file, index) => ({
+          id: [
+            file.name,
+            file.size,
+            file.lastModified,
+            Date.now(),
+            index,
+          ].join("-"),
 
-            file,
+          file,
 
-            title: creator
-              ? suggestedTitle(
-                  creator.name,
-                  startIndex +
-                    index +
-                    1,
-                )
-              : `Webcam Video ${String(
-                  startIndex +
-                    index +
-                    1,
-                ).padStart(2, "0")}`,
+          title: suggestedTitle(
+            creator.name,
+            startIndex + index + 1,
+          ),
 
-            progress: 0,
-            status: "queued",
-          }),
-        );
+          progress: 0,
+          status: "queued",
+        }));
 
       return [
         ...previous,
@@ -273,14 +249,11 @@ export function VideoUploadForm({
   }
 
   function removeFile(id: string) {
-    if (uploading) {
-      return;
-    }
+    if (uploading) return;
 
     setFiles((previous) =>
       previous.filter(
-        (item) =>
-          item.id !== id,
+        (item) => item.id !== id,
       ),
     );
   }
@@ -292,10 +265,7 @@ export function VideoUploadForm({
     setFiles((previous) =>
       previous.map((item) =>
         item.id === id
-          ? {
-              ...item,
-              title,
-            }
+          ? { ...item, title }
           : item,
       ),
     );
@@ -311,33 +281,16 @@ export function VideoUploadForm({
       creator: "",
     }));
 
-    if (!next) {
-      return;
-    }
+    if (!next) return;
 
-    /*
-     * When the creator changes, regenerate
-     * automatic titles for files that are still
-     * using the generated naming pattern.
-     */
     setFiles((previous) =>
-      previous.map(
-        (item, index) => ({
-          ...item,
-          title:
-            item.title.startsWith(
-              "Webcam Video",
-            ) ||
-            item.title.includes(
-              " Webcam Video ",
-            )
-              ? suggestedTitle(
-                  next.name,
-                  index + 1,
-                )
-              : item.title,
-        }),
-      ),
+      previous.map((item, index) => ({
+        ...item,
+        title: suggestedTitle(
+          next.name,
+          index + 1,
+        ),
+      })),
     );
   }
 
@@ -349,8 +302,6 @@ export function VideoUploadForm({
     requestRefs.current.clear();
 
     setFiles([]);
-    setCreator(null);
-    setCategoryId("");
     setTagIds([]);
     setSummary("");
     setUploading(false);
@@ -384,10 +335,7 @@ export function VideoUploadForm({
     }
 
     for (const item of files) {
-      if (
-        item.title.trim().length <
-        3
-      ) {
+      if (item.title.trim().length < 3) {
         next.title =
           "Every video needs a title of at least 3 characters.";
         break;
@@ -401,107 +349,99 @@ export function VideoUploadForm({
     );
   }
 
+  function encodeUploadMetadata(data: {
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    title: string;
+    creatorId: string;
+    categoryId: string;
+    publish: boolean;
+    summary: string | null;
+    tagIds: string[];
+  }) {
+    const json = JSON.stringify(data);
+    const bytes = new TextEncoder().encode(json);
+
+    let binary = "";
+    const chunkSize = 0x8000;
+
+    for (
+      let index = 0;
+      index < bytes.length;
+      index += chunkSize
+    ) {
+      const chunk = bytes.subarray(
+        index,
+        Math.min(index + chunkSize, bytes.length),
+      );
+
+      binary += String.fromCharCode(...chunk);
+    }
+
+    return btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+  }
+
   function uploadOne(
     item: UploadItem,
-    mode: UploadMode,
   ): Promise<void> {
     if (!creator) {
       return Promise.resolve();
     }
 
     return new Promise((resolve) => {
-      const body = new FormData();
+      const request = new XMLHttpRequest();
 
-      body.set(
-        "file",
-        item.file,
-      );
-
-      body.set(
-        "title",
-        item.title.trim(),
-      );
-
-      body.set(
-        "creatorId",
-        creator.id,
-      );
-
-      body.set(
-        "categoryId",
-        categoryId,
-      );
-
-      body.set(
-        "publish",
-        mode === "publish"
-          ? "true"
-          : "false",
-      );
-
-      if (summary.trim()) {
-        body.set(
-          "summary",
-          summary.trim(),
-        );
-      }
-
-      for (const tagId of tagIds) {
-        body.append(
-          "tagIds",
-          tagId,
-        );
-      }
-
-      const request =
-        new XMLHttpRequest();
-
-      requestRefs.current.set(
-        item.id,
-        request,
-      );
+      requestRefs.current.set(item.id, request);
 
       setFiles((previous) =>
         previous.map((entry) =>
           entry.id === item.id
             ? {
                 ...entry,
-                status:
-                  "uploading",
+                status: "uploading",
                 progress: 0,
-                message:
-                  undefined,
+                message: undefined,
               }
             : entry,
         ),
       );
 
+      const metadata = encodeUploadMetadata({
+        filename: item.file.name,
+        mimeType:
+          item.file.type || "application/octet-stream",
+        sizeBytes: item.file.size,
+        title: item.title.trim(),
+        creatorId: creator.id,
+        categoryId,
+        publish: uploadMode === "publish",
+        summary: summary.trim() || null,
+        tagIds,
+      });
+
       request.upload.addEventListener(
         "progress",
         (event) => {
-          if (
-            !event.lengthComputable
-          ) {
+          if (!event.lengthComputable) {
             return;
           }
 
-          const progress =
-            Math.round(
-              (event.loaded /
-                event.total) *
-                100,
-            );
+          const progress = Math.round(
+            (event.loaded / event.total) * 100,
+          );
 
           setFiles((previous) =>
-            previous.map(
-              (entry) =>
-                entry.id ===
-                item.id
-                  ? {
-                      ...entry,
-                      progress,
-                    }
-                  : entry,
+            previous.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    progress,
+                  }
+                : entry,
             ),
           );
         },
@@ -510,92 +450,67 @@ export function VideoUploadForm({
       request.addEventListener(
         "load",
         () => {
-          requestRefs.current.delete(
-            item.id,
-          );
+          requestRefs.current.delete(item.id);
 
           try {
-            const parsed =
-              JSON.parse(
-                request.responseText,
-              ) as {
-                data?: {
-                  contentId?: string;
-                  slug?: string;
-                };
-                error?: {
-                  message?: string;
-                };
+            const parsed = JSON.parse(
+              request.responseText,
+            ) as {
+              data?: {
+                contentId?: string;
+                slug?: string;
               };
+              error?: {
+                message?: string;
+              };
+            };
 
             if (
-              request.status >=
-                200 &&
+              request.status >= 200 &&
               request.status < 300 &&
-              parsed.data
-                ?.contentId
+              parsed.data?.contentId
             ) {
-              setFiles(
-                (previous) =>
-                  previous.map(
-                    (entry) =>
-                      entry.id ===
-                      item.id
-                        ? {
-                            ...entry,
-                            status:
-                              "uploaded",
-                            progress:
-                              100,
-                            contentId:
-                              parsed
-                                .data
-                                ?.contentId,
-                            slug:
-                              parsed
-                                .data
-                                ?.slug,
-                          }
-                        : entry,
-                  ),
+              setFiles((previous) =>
+                previous.map((entry) =>
+                  entry.id === item.id
+                    ? {
+                        ...entry,
+                        status: "uploaded",
+                        progress: 100,
+                        contentId:
+                          parsed.data?.contentId,
+                        slug: parsed.data?.slug,
+                      }
+                    : entry,
+                ),
               );
             } else {
-              setFiles(
-                (previous) =>
-                  previous.map(
-                    (entry) =>
-                      entry.id ===
-                      item.id
-                        ? {
-                            ...entry,
-                            status:
-                              "error",
-                            message:
-                              parsed
-                                .error
-                                ?.message ??
-                              "The upload was refused. Try again.",
-                          }
-                        : entry,
-                  ),
+              setFiles((previous) =>
+                previous.map((entry) =>
+                  entry.id === item.id
+                    ? {
+                        ...entry,
+                        status: "error",
+                        message:
+                          parsed.error?.message ??
+                          "The upload was refused. Try again.",
+                      }
+                    : entry,
+                ),
               );
             }
           } catch {
-            setFiles(
-              (previous) =>
-                previous.map(
-                  (entry) =>
-                    entry.id ===
-                    item.id
-                      ? {
-                          ...entry,
-                          status:
-                            "error",
-                          message:
-                            "The server sent an unreadable response.",
-                        }
-                      : entry,
-                ),
+            setFiles((previous) =>
+              previous.map((entry) =>
+                entry.id === item.id
+                  ? {
+                      ...entry,
+                      status: "error",
+                      message:
+                        "The server sent an unreadable response.",
+                    }
+                  : entry,
+              ),
             );
           }
 
@@ -606,22 +521,18 @@ export function VideoUploadForm({
       request.addEventListener(
         "error",
         () => {
-          requestRefs.current.delete(
-            item.id,
-          );
+          requestRefs.current.delete(item.id);
 
           setFiles((previous) =>
-            previous.map(
-              (entry) =>
-                entry.id === item.id
-                  ? {
-                      ...entry,
-                      status:
-                        "error",
-                      message:
-                        "The connection dropped before the file finished.",
-                    }
-                  : entry,
+            previous.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    status: "error",
+                    message:
+                      "The connection dropped before the file finished.",
+                  }
+                : entry,
             ),
           );
 
@@ -632,22 +543,17 @@ export function VideoUploadForm({
       request.addEventListener(
         "abort",
         () => {
-          requestRefs.current.delete(
-            item.id,
-          );
+          requestRefs.current.delete(item.id);
 
           setFiles((previous) =>
-            previous.map(
-              (entry) =>
-                entry.id === item.id
-                  ? {
-                      ...entry,
-                      status:
-                        "error",
-                      message:
-                        "Upload cancelled.",
-                    }
-                  : entry,
+            previous.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    status: "error",
+                    message: "Upload cancelled.",
+                  }
+                : entry,
             ),
           );
 
@@ -655,26 +561,37 @@ export function VideoUploadForm({
         },
       );
 
-      /*
-       * Do NOT manually set Content-Type.
-       * The browser creates the multipart
-       * boundary automatically.
-       */
       request.open(
         "POST",
         "/api/admin/videos/upload",
       );
 
-      request.send(body);
+      /*
+       * The video is sent as the raw request body.
+       * Metadata is sent separately so the server
+       * can stream the large video directly to disk
+       * without parsing multipart/form-data.
+       */
+      request.setRequestHeader(
+        "Content-Type",
+        "application/octet-stream",
+      );
+
+      request.setRequestHeader(
+        "X-Video-Metadata",
+        metadata,
+      );
+
+      request.send(item.file);
     });
   }
 
   async function submit(
     mode: UploadMode,
   ) {
-    if (uploading) {
-      return;
-    }
+    if (uploading) return;
+
+    setUploadMode(mode);
 
     if (!validate()) {
       return;
@@ -687,40 +604,41 @@ export function VideoUploadForm({
     setUploading(true);
     setMessage(null);
 
+    /*
+     * Only queued and failed files are sent.
+     * Successfully uploaded files are never duplicated.
+     */
     const pendingFiles =
       files.filter(
         (item) =>
-          item.status ===
-            "queued" ||
-          item.status ===
-            "error",
+          item.status === "queued" ||
+          item.status === "error",
       );
 
     /*
-     * Sequential upload:
-     * one video finishes before the next starts.
-     * This keeps memory usage predictable.
+     * Upload sequentially.
+     *
+     * This keeps memory and network usage
+     * predictable when uploading many large videos.
      */
     for (const item of pendingFiles) {
-      await uploadOne(
-        item,
-        mode,
-      );
+      await uploadOne(item);
     }
 
     setUploading(false);
 
     router.refresh();
 
-    if (mode === "publish") {
-      setMessage(
-        "Upload finished. Videos were sent with automatic publish enabled.",
-      );
-    } else {
-      setMessage(
-        "Upload finished. Videos were uploaded as drafts.",
-      );
-    }
+    /*
+     * We intentionally don't calculate the final
+     * count from stale React state here.
+     * The individual rows already show the result.
+     */
+    setMessage(
+      mode === "publish"
+        ? "Upload finished. Videos were sent with automatic publish enabled."
+        : "Upload finished. Videos were uploaded as drafts.",
+    );
   }
 
   const queuedCount =
@@ -732,15 +650,13 @@ export function VideoUploadForm({
   const uploadingCount =
     files.filter(
       (item) =>
-        item.status ===
-        "uploading",
+        item.status === "uploading",
     ).length;
 
   const uploadedCount =
     files.filter(
       (item) =>
-        item.status ===
-        "uploaded",
+        item.status === "uploaded",
     ).length;
 
   const errorCount =
@@ -753,7 +669,6 @@ export function VideoUploadForm({
 
   return (
     <div className="space-y-6">
-      {/* CREATOR */}
       <CreatorPicker
         value={creator}
         onChange={chooseCreator}
@@ -853,7 +768,7 @@ export function VideoUploadForm({
                     ) : null}
                   </div>
 
-                  {/* AUTOMATIC SEO TITLE */}
+                  {/* SEO TITLE */}
                   <div className="mt-3">
                     <label
                       htmlFor={`video-title-${item.id}`}
@@ -878,13 +793,13 @@ export function VideoUploadForm({
                     />
 
                     <p className="mt-1 text-2xs text-ink-faint">
-                      Automatic SEO
-                      title #{index + 1}
+                      SEO-friendly automatic title
+                      #{index + 1}
                     </p>
                   </div>
 
                   {item.status ===
-                  "uploading" ? (
+                    "uploading" ? (
                     <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-line">
                       <div
                         className="h-full rounded-full bg-accent transition-[width] duration-200"
@@ -921,7 +836,7 @@ export function VideoUploadForm({
               ),
             )}
 
-            <div className="flex flex-wrap gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 size="sm"
@@ -1160,7 +1075,7 @@ export function VideoUploadForm({
         )}
       </FormField>
 
-      {/* BATCH STATUS */}
+      {/* STATUS */}
       {files.length > 0 ? (
         <div className="rounded-control border border-line bg-raised px-4 py-3">
           <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs text-ink-muted">
@@ -1225,9 +1140,10 @@ export function VideoUploadForm({
 
           <span className="flex-1">
             Some videos failed.
-            Press the upload button
-            again to retry only the
-            failed videos.
+            Press the appropriate
+            upload button again to
+            retry only failed
+            videos.
           </span>
 
           <RotateCw
@@ -1245,9 +1161,10 @@ export function VideoUploadForm({
           </p>
 
           <p className="mt-1 text-xs text-ink-muted">
-            Choose whether videos
-            should remain drafts or
-            be published automatically
+            Choose whether the
+            uploaded videos should
+            remain drafts or be
+            published automatically
             after processing.
           </p>
         </div>
@@ -1315,6 +1232,9 @@ export function VideoUploadForm({
           </div>
         </div>
       ) : null}
+
+      {/* Existing processing tracker remains available through
+          the individual "View video" / edit flow. */}
     </div>
   );
 }

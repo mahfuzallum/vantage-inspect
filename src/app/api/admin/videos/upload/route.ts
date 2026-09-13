@@ -1,8 +1,12 @@
 import type { NextRequest } from "next/server";
 
 import {
+  createWriteStream,
+} from "node:fs";
+
+import {
   mkdir,
-  writeFile,
+  rename,
   unlink,
 } from "node:fs/promises";
 
@@ -51,6 +55,381 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 /**
+ * Decode the metadata header sent by the browser.
+ *
+ * The video itself is sent as the raw request body.
+ * Metadata is sent separately so Next.js does not need
+ * to parse the entire multipart request into memory.
+ */
+function decodeMetadata(
+  value: string | null,
+): {
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+  title: string;
+  creatorId: string | null;
+  categoryId: string | null;
+  publish: boolean;
+  summary: string | null;
+  description: string | null;
+  isFeatured: boolean;
+  tagIds: string[];
+} {
+  if (!value) {
+    throw new ApiError(
+      "BAD_REQUEST",
+      "Upload metadata was not provided.",
+    );
+  }
+
+  try {
+    const normalized =
+      value
+        .replace(/-/g, "+")
+        .replace(/_/g, "/");
+
+    const padded =
+      normalized.padEnd(
+        Math.ceil(normalized.length / 4) * 4,
+        "=",
+      );
+
+    const json =
+      Buffer.from(
+        padded,
+        "base64",
+      ).toString("utf8");
+
+    const data =
+      JSON.parse(json) as Record<
+        string,
+        unknown
+      >;
+
+    const filename =
+      String(
+        data.filename ?? "",
+      ).trim();
+
+    const mimeType =
+      String(
+        data.mimeType ?? "",
+      ).trim();
+
+    const sizeBytes =
+      Number(
+        data.sizeBytes ?? 0,
+      );
+
+    const title =
+      String(
+        data.title ?? "",
+      ).trim();
+
+    if (!filename) {
+      throw new ApiError(
+        "BAD_REQUEST",
+        "The uploaded video has no filename.",
+      );
+    }
+
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+      throw new ApiError(
+        "BAD_REQUEST",
+        "The uploaded video size is invalid.",
+      );
+    }
+
+    if (title.length < 3) {
+      throw new ApiError(
+        "BAD_REQUEST",
+        "Enter a title of at least 3 characters.",
+      );
+    }
+
+    const rawTagIds =
+      Array.isArray(data.tagIds)
+        ? data.tagIds
+        : [];
+
+    const tagIds =
+      rawTagIds
+        .map(String)
+        .filter(
+          (id) =>
+            /^[a-z0-9]{20,32}$/i.test(
+              id,
+            ),
+        )
+        .slice(0, 20);
+
+    return {
+      filename,
+
+      mimeType,
+
+      sizeBytes,
+
+      title,
+
+      creatorId:
+        String(
+          data.creatorId ?? "",
+        ) || null,
+
+      categoryId:
+        String(
+          data.categoryId ?? "",
+        ) || null,
+
+      publish:
+        data.publish === true,
+
+      summary:
+        String(
+          data.summary ?? "",
+        ).trim() || null,
+
+      description:
+        String(
+          data.description ?? "",
+        ).trim() || null,
+
+      isFeatured:
+        data.isFeatured === true,
+
+      tagIds,
+    };
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw error;
+    }
+
+    throw new ApiError(
+      "BAD_REQUEST",
+      "The upload metadata is invalid.",
+    );
+  }
+}
+
+/**
+ * Write one Web Stream chunk to a Node write stream
+ * while respecting backpressure.
+ */
+async function writeChunk(
+  stream: ReturnType<typeof createWriteStream>,
+  chunk: Uint8Array,
+) {
+  if (
+    stream.write(chunk)
+  ) {
+    return;
+  }
+
+  await new Promise<void>(
+    (
+      resolve,
+      reject,
+    ) => {
+      const onDrain =
+        () => {
+          cleanup();
+          resolve();
+        };
+
+      const onError =
+        (
+          error: Error,
+        ) => {
+          cleanup();
+          reject(error);
+        };
+
+      const cleanup =
+        () => {
+          stream.off(
+            "drain",
+            onDrain,
+          );
+
+          stream.off(
+            "error",
+            onError,
+          );
+        };
+
+      stream.once(
+        "drain",
+        onDrain,
+      );
+
+      stream.once(
+        "error",
+        onError,
+      );
+    },
+  );
+}
+
+/**
+ * Stream the request body directly to disk.
+ *
+ * Only the first 4096 bytes are kept in memory for
+ * container validation.
+ */
+async function streamUploadToDisk(
+  request: NextRequest,
+  tempPath: string,
+  expectedSize: number,
+) {
+  const body =
+    request.body;
+
+  if (!body) {
+    throw new ApiError(
+      "BAD_REQUEST",
+      "No video body was received.",
+    );
+  }
+
+  const reader =
+    body.getReader();
+
+  const output =
+    createWriteStream(
+      tempPath,
+      {
+        flags: "w",
+      },
+    );
+
+  let receivedBytes = 0;
+
+  const headChunks: Buffer[] = [];
+
+  try {
+    while (true) {
+      const result =
+        await reader.read();
+
+      if (result.done) {
+        break;
+      }
+
+      const chunk =
+        Buffer.from(
+          result.value,
+        );
+
+      receivedBytes +=
+        chunk.byteLength;
+
+      /*
+       * Hard server-side size protection.
+       */
+      if (
+        receivedBytes >
+        maxUploadBytes()
+      ) {
+        throw new ApiError(
+          "BAD_REQUEST",
+          `That file exceeds the ${serverEnv().MAX_VIDEO_UPLOAD_MB}MB limit.`,
+        );
+      }
+
+      /*
+       * Keep only the first 4096 bytes
+       * for container detection.
+       */
+      if (
+        receivedBytes <= 4096
+      ) {
+        headChunks.push(
+          chunk,
+        );
+      } else if (
+        headChunks.length > 0
+      ) {
+        const currentHead =
+          Buffer.concat(
+            headChunks,
+          );
+
+        if (
+          currentHead.length <
+          4096
+        ) {
+          headChunks.push(
+            chunk.subarray(
+              0,
+              4096 -
+                currentHead.length,
+            ),
+          );
+        }
+      }
+
+      await writeChunk(
+        output,
+        chunk,
+      );
+    }
+
+    await new Promise<void>(
+      (
+        resolve,
+        reject,
+      ) => {
+        output.end(
+          () => resolve(),
+        );
+
+        output.once(
+          "error",
+          reject,
+        );
+      },
+    );
+
+    /*
+     * The client-declared size and actual
+     * received bytes must match.
+     */
+    if (
+      receivedBytes !==
+      expectedSize
+    ) {
+      throw new ApiError(
+        "BAD_REQUEST",
+        "The uploaded file was incomplete or corrupted during transfer.",
+      );
+    }
+
+    return {
+      sizeBytes:
+        receivedBytes,
+
+      head:
+        Buffer.concat(
+          headChunks,
+        ).subarray(
+          0,
+          4096,
+        ),
+    };
+  } catch (error) {
+    output.destroy();
+
+    await reader.cancel().catch(
+      () => undefined,
+    );
+
+    throw error;
+  }
+}
+
+/**
  * Authorized video upload.
  *
  * Supports:
@@ -61,12 +440,16 @@ export const maxDuration = 300;
  * - MKV
  * - M4V
  *
- * Upload processing remains asynchronous.
+ * The video body is streamed directly to disk.
  */
 export async function POST(
   request: NextRequest,
 ) {
-  let tempPath: string | null = null;
+  let tempPath: string | null =
+    null;
+
+  let finalPath: string | null =
+    null;
 
   try {
     /*
@@ -97,8 +480,19 @@ export async function POST(
     }
 
     /*
-     * Check declared request size before
-     * reading the complete multipart body.
+     * The browser sends the metadata separately
+     * from the raw video body.
+     */
+    const metadata =
+      decodeMetadata(
+        request.headers.get(
+          "x-video-metadata",
+        ),
+      );
+
+    /*
+     * Reject a request that is already larger
+     * than the configured limit.
      */
     const declaredLength =
       Number(
@@ -108,8 +502,9 @@ export async function POST(
       );
 
     if (
+      declaredLength > 0 &&
       declaredLength >
-      maxUploadBytes() * 1.05
+        maxUploadBytes()
     ) {
       throw new ApiError(
         "BAD_REQUEST",
@@ -118,51 +513,64 @@ export async function POST(
     }
 
     /*
-     * Read multipart/form-data.
-     *
-     * The browser must create the multipart
-     * boundary automatically.
+     * The metadata size must also respect
+     * the configured upload ceiling.
      */
-    const form =
-      await request.formData();
-
-    const file =
-      form.get("file");
-
-    const title =
-      String(
-        form.get("title") ?? "",
-      ).trim();
-
-    const shouldPublish =
-      String(
-        form.get("publish") ?? "",
-      ).toLowerCase() === "true";
-
     if (
-      !(file instanceof File)
+      metadata.sizeBytes >
+      maxUploadBytes()
     ) {
       throw new ApiError(
         "BAD_REQUEST",
-        "No video file was received.",
-      );
-    }
-
-    if (
-      title.length < 3
-    ) {
-      throw new ApiError(
-        "BAD_REQUEST",
-        "Enter a title of at least 3 characters.",
+        `That file exceeds the ${serverEnv().MAX_VIDEO_UPLOAD_MB}MB limit.`,
       );
     }
 
     /*
-     * Read uploaded bytes.
+     * Create a temporary directory outside
+     * the final source path.
      */
-    const bytes =
-      Buffer.from(
-        await file.arrayBuffer(),
+    const uploadTempRoot =
+      path.join(
+        serverEnv()
+          .MEDIA_LOCAL_ROOT,
+        ".upload-temp",
+      );
+
+    await mkdir(
+      uploadTempRoot,
+      {
+        recursive: true,
+      },
+    );
+
+    /*
+     * Generate a temporary filename.
+     */
+    const tempFilename =
+      `${Date.now()}-${Math.random().toString(36).slice(2)}.part`;
+
+    tempPath =
+      path.join(
+        uploadTempRoot,
+        tempFilename,
+      );
+
+    /*
+     * Stream the video directly to disk.
+     *
+     * This avoids:
+     *
+     * Buffer.from(await file.arrayBuffer())
+     *
+     * and therefore avoids loading a 1GB/2GB
+     * video completely into RAM.
+     */
+    const streamed =
+      await streamUploadToDisk(
+        request,
+        tempPath,
+        metadata.sizeBytes,
       );
 
     /*
@@ -176,19 +584,16 @@ export async function POST(
     const check =
       validateUpload({
         filename:
-          file.name,
+          metadata.filename,
 
         sizeBytes:
-          bytes.byteLength,
+          streamed.sizeBytes,
 
         declaredMime:
-          file.type,
+          metadata.mimeType,
 
         head:
-          bytes.subarray(
-            0,
-            4096,
-          ),
+          streamed.head,
       });
 
     if (!check.ok) {
@@ -203,7 +608,9 @@ export async function POST(
      */
     const slug =
       await uniqueSlug(
-        slugify(title),
+        slugify(
+          metadata.title,
+        ),
         async (
           candidate,
         ) =>
@@ -224,52 +631,17 @@ export async function POST(
       );
 
     /*
-     * Optional creator.
+     * Verify requested tags.
      */
-    const creatorId =
-      String(
-        form.get(
-          "creatorId",
-        ) ?? "",
-      ) || null;
-
-    /*
-     * Optional category.
-     */
-    const categoryId =
-      String(
-        form.get(
-          "categoryId",
-        ) ?? "",
-      ) || null;
-
-    /*
-     * Requested tags.
-     */
-    const requestedTagIds =
-      form
-        .getAll("tagIds")
-        .map(String)
-        .filter(
-          (id) =>
-            /^[a-z0-9]{20,32}$/i.test(
-              id,
-            ),
-        )
-        .slice(
-          0,
-          20,
-        );
-
     const tagIds =
-      requestedTagIds.length > 0
+      metadata.tagIds.length > 0
         ? (
             await db.tag.findMany(
               {
                 where: {
                   id: {
                     in:
-                      requestedTagIds,
+                      metadata.tagIds,
                   },
                 },
 
@@ -292,56 +664,47 @@ export async function POST(
         data: {
           slug,
 
-          title,
+          title:
+            metadata.title,
 
           summary:
-            String(
-              form.get(
-                "summary",
-              ) ?? "",
-            ).trim() || null,
+            metadata.summary,
 
           description:
-            String(
-              form.get(
-                "description",
-              ) ?? "",
-            ).trim() || null,
+            metadata.description,
 
           kind:
             "VIDEO",
 
           status:
-            shouldPublish
+            metadata.publish
               ? "PUBLISHED"
               : "DRAFT",
 
           publishedAt:
-            shouldPublish
+            metadata.publish
               ? new Date()
               : null,
 
           isFeatured:
-            form.get(
-              "isFeatured",
-            ) === "true",
+            metadata.isFeatured,
 
           category:
-            categoryId
+            metadata.categoryId
               ? {
                   connect: {
                     id:
-                      categoryId,
+                      metadata.categoryId,
                   },
                 }
               : undefined,
 
           creator:
-            creatorId
+            metadata.creatorId
               ? {
                   connect: {
                     id:
-                      creatorId,
+                      metadata.creatorId,
                   },
                 }
               : undefined,
@@ -375,11 +738,6 @@ export async function POST(
 
     /*
      * Generate safe storage key.
-     *
-     * The original uploaded filename is
-     * never used as a filesystem path.
-     *
-     * `.ts` is now supported here too.
      */
     const objectKey =
       storagePaths.source(
@@ -388,16 +746,9 @@ export async function POST(
       );
 
     /*
-     * IMPORTANT:
-     *
-     * Local provider storage must live OUTSIDE
-     * the Next.js `public` directory.
-     *
-     * Example:
-     *
-     * MEDIA_LOCAL_ROOT="./storage/uploads"
+     * Final local filesystem path.
      */
-    tempPath =
+    finalPath =
       path.join(
         serverEnv()
           .MEDIA_LOCAL_ROOT,
@@ -406,18 +757,23 @@ export async function POST(
 
     await mkdir(
       path.dirname(
-        tempPath,
+        finalPath,
       ),
       {
-        recursive:
-          true,
+        recursive: true,
       },
     );
 
-    await writeFile(
+    /*
+     * Move the completed temporary upload
+     * into its final source location.
+     */
+    await rename(
       tempPath,
-      bytes,
+      finalPath,
     );
+
+    tempPath = null;
 
     /*
      * Create source media asset.
@@ -446,7 +802,7 @@ export async function POST(
             check.detectedMime,
 
           sizeBytes:
-            bytes.byteLength,
+            streamed.sizeBytes,
 
           uploadedById:
             admin.id,
@@ -481,7 +837,7 @@ export async function POST(
       );
 
     console.info(
-      `[upload] completed content=${content.id} status=${content.status} publish=${shouldPublish} extension=${check.extension} mime=${check.detectedMime} bytes=${bytes.byteLength} by=${admin.id}`,
+      `[upload] completed content=${content.id} status=${content.status} publish=${metadata.publish} extension=${check.extension} mime=${check.detectedMime} bytes=${streamed.sizeBytes} by=${admin.id}`,
     );
 
     return ok(
@@ -501,7 +857,7 @@ export async function POST(
           content.publishedAt,
 
         published:
-          shouldPublish,
+          metadata.publish,
       },
       {
         status: 201,
@@ -509,12 +865,23 @@ export async function POST(
     );
   } catch (error) {
     /*
-     * Remove local source if something failed
-     * after the file was written.
+     * Remove incomplete temporary upload.
      */
     if (tempPath) {
       await unlink(
         tempPath,
+      ).catch(
+        () => undefined,
+      );
+    }
+
+    /*
+     * Remove final source if a later operation
+     * failed after the rename.
+     */
+    if (finalPath) {
+      await unlink(
+        finalPath,
       ).catch(
         () => undefined,
       );
