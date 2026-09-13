@@ -12,10 +12,12 @@ const serverSchema = z.object({
   AUTH_SECRET: z.string().min(32, "AUTH_SECRET must be at least 32 characters"),
   AUTH_URL: z.string().url().optional(),
   SESSION_MAX_AGE_DAYS: z.coerce.number().int().positive().default(30),
+
   MEDIA_PROVIDER: z.enum(["local", "s3"]).default("local"),
   MEDIA_LOCAL_ROOT: z.string().default("./public/uploads"),
   MEDIA_PUBLIC_BASE_URL: z.string().default("/uploads"),
   MEDIA_MAX_UPLOAD_MB: z.coerce.number().int().positive().default(512),
+
   STORAGE_ENDPOINT: z.string().optional(),
   STORAGE_REGION: z.string().default("auto"),
   STORAGE_BUCKET: z.string().optional(),
@@ -26,18 +28,37 @@ const serverSchema = z.object({
     .enum(["true", "false"])
     .default("false")
     .transform((value) => value === "true"),
+
+  /*
+   * Railway Storage Bucket variables.
+   *
+   * These are kept optional so existing STORAGE_* configuration continues
+   * to work unchanged. When STORAGE_* values are absent, the S3 provider
+   * can use these Railway AWS-compatible variables as a fallback.
+   */
+  AWS_ENDPOINT_URL: z.string().optional(),
+  AWS_DEFAULT_REGION: z.string().optional(),
+  AWS_S3_BUCKET_NAME: z.string().optional(),
+  AWS_ACCESS_KEY_ID: z.string().optional(),
+  AWS_SECRET_ACCESS_KEY: z.string().optional(),
+
   MAX_VIDEO_UPLOAD_MB: z.coerce.number().int().positive().default(2048),
   VIDEO_WORK_DIR: z.string().default("./.tmp/video"),
   FFMPEG_PATH: z.string().default("ffmpeg"),
   FFPROBE_PATH: z.string().default("ffprobe"),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5000),
   WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(1),
+
   RATE_LIMIT_STORE: z.enum(["memory", "redis"]).default("memory"),
-  EMAIL_PROVIDER: z.enum(["console", "resend", "postmark", "smtp"]).default("console"),
+
+  EMAIL_PROVIDER: z
+    .enum(["console", "resend", "postmark", "smtp"])
+    .default("console"),
   EMAIL_FROM: z.string().optional(),
   RESEND_API_KEY: z.string().optional(),
   POSTMARK_SERVER_TOKEN: z.string().optional(),
   POSTMARK_MESSAGE_STREAM: z.string().optional(),
+
   REDIS_URL: z.string().optional(),
 });
 
@@ -49,8 +70,11 @@ const publicSchema = z.object({
 
 function parseServerEnv() {
   const parsed = serverSchema.safeParse(process.env);
+
   if (!parsed.success) {
-    const issues = parsed.error.issues.map((i) => `  - ${i.path.join(".")}: ${i.message}`);
+    const issues = parsed.error.issues.map(
+      (i) => `  - ${i.path.join(".")}: ${i.message}`,
+    );
 
     /*
       A bad .env surfaces as a page failing somewhere far from the cause — the
@@ -69,20 +93,58 @@ function parseServerEnv() {
       ].join("\n"),
     );
   }
+
   // A configured transport without a From address would fail at send time;
   // better to refuse at boot.
-  if (parsed.data.EMAIL_PROVIDER !== "console" && !parsed.data.EMAIL_FROM) {
-    throw new Error(`EMAIL_PROVIDER=${parsed.data.EMAIL_PROVIDER} requires EMAIL_FROM`);
+  if (
+    parsed.data.EMAIL_PROVIDER !== "console" &&
+    !parsed.data.EMAIL_FROM
+  ) {
+    throw new Error(
+      `EMAIL_PROVIDER=${parsed.data.EMAIL_PROVIDER} requires EMAIL_FROM`,
+    );
   }
 
   if (parsed.data.MEDIA_PROVIDER === "s3") {
-    const missing = (
-      ["STORAGE_BUCKET", "STORAGE_ACCESS_KEY", "STORAGE_SECRET_KEY"] as const
-    ).filter((key) => !parsed.data[key]);
+    const bucket =
+      parsed.data.STORAGE_BUCKET ??
+      parsed.data.AWS_S3_BUCKET_NAME;
+
+    const accessKey =
+      parsed.data.STORAGE_ACCESS_KEY ??
+      parsed.data.AWS_ACCESS_KEY_ID;
+
+    const secretKey =
+      parsed.data.STORAGE_SECRET_KEY ??
+      parsed.data.AWS_SECRET_ACCESS_KEY;
+
+    const missing: string[] = [];
+
+    if (!bucket) {
+      missing.push(
+        "STORAGE_BUCKET or AWS_S3_BUCKET_NAME",
+      );
+    }
+
+    if (!accessKey) {
+      missing.push(
+        "STORAGE_ACCESS_KEY or AWS_ACCESS_KEY_ID",
+      );
+    }
+
+    if (!secretKey) {
+      missing.push(
+        "STORAGE_SECRET_KEY or AWS_SECRET_ACCESS_KEY",
+      );
+    }
+
     if (missing.length > 0) {
-      throw new Error(`MEDIA_PROVIDER=s3 requires: ${missing.join(", ")}`);
+      throw new Error(
+        `MEDIA_PROVIDER=s3 requires: ${missing.join(", ")}`,
+      );
     }
   }
+
   return parsed.data;
 }
 
