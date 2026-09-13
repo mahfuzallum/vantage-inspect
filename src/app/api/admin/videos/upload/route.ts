@@ -342,32 +342,21 @@ async function streamUploadToDisk(
        * Keep only the first 4096 bytes
        * for container detection.
        */
-      if (
-        receivedBytes <= 4096
-      ) {
-        headChunks.push(
-          chunk,
+      // Always keep the first 4096 bytes, even when the browser
+      // sends a chunk larger than 4096 bytes.
+      const headBytes =
+        headChunks.reduce(
+          (total, part) => total + part.length,
+          0,
         );
-      } else if (
-        headChunks.length > 0
-      ) {
-        const currentHead =
-          Buffer.concat(
-            headChunks,
-          );
 
-        if (
-          currentHead.length <
-          4096
-        ) {
-          headChunks.push(
-            chunk.subarray(
-              0,
-              4096 -
-                currentHead.length,
-            ),
-          );
-        }
+      if (headBytes < 4096) {
+        headChunks.push(
+          chunk.subarray(
+            0,
+            4096 - headBytes,
+          ),
+        );
       }
 
       await writeChunk(
