@@ -134,7 +134,25 @@ export function VideoUploadForm({
   const [dragging, setDragging] =
     useState(false);
 
-  const accept = acceptedExtensions
+  const normalizedExtensions = Array.from(
+    new Set(
+      acceptedExtensions
+        .map((extension) => {
+          const value = extension
+            .trim()
+            .toLowerCase();
+
+          if (value.includes("/")) {
+            return value.split("/").pop() ?? "";
+          }
+
+          return value.replace(/^\./, "");
+        })
+        .filter(Boolean),
+    ),
+  );
+
+  const accept = normalizedExtensions
     .map((extension) => `.${extension}`)
     .join(",");
 
@@ -159,14 +177,14 @@ export function VideoUploadForm({
         getFileExtension(file);
 
       if (
-        !acceptedExtensions.includes(
+        !normalizedExtensions.includes(
           extension,
         )
       ) {
         nextErrors.file =
-          `That file type isn't accepted. Use ${acceptedExtensions.join(
-            ", ",
-          )}.`;
+          `That file type isn't accepted. Use ${normalizedExtensions
+            .map((item) => `.${item}`)
+            .join(", ")}.`;
         continue;
       }
 
@@ -199,10 +217,7 @@ export function VideoUploadForm({
 
     setErrors(nextErrors);
 
-    if (
-      validFiles.length === 0 ||
-      !creator
-    ) {
+    if (validFiles.length === 0) {
       return;
     }
 
@@ -221,10 +236,15 @@ export function VideoUploadForm({
 
           file,
 
-          title: suggestedTitle(
-            creator.name,
-            startIndex + index + 1,
-          ),
+          title: creator
+            ? suggestedTitle(
+                creator.name,
+                startIndex + index + 1,
+              )
+            : file.name.replace(
+                /\.[^/.]+$/,
+                "",
+              ),
 
           progress: 0,
           status: "queued",
@@ -915,9 +935,9 @@ export function VideoUploadForm({
             </Button>
 
             <p className="slate mt-3">
-              {acceptedExtensions.join(
-                ", ",
-              )}{" "}
+              {normalizedExtensions
+                .map((item) => `.${item}`)
+                .join(", ")}{" "}
               · up to{" "}
               {maxUploadMb}MB each
             </p>
@@ -927,7 +947,7 @@ export function VideoUploadForm({
         <input
           ref={inputRef}
           type="file"
-          accept={accept}
+          accept={`${accept},video/mp4,video/quicktime,video/webm,video/x-matroska,video/mp2t,video/x-m4v`}
           multiple
           className="sr-only"
           onChange={(event) => {
