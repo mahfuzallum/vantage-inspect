@@ -405,32 +405,52 @@ export function VideoUploadForm({
       .replace(/=+$/g, "");
   }
 
-  function uploadOne(
+  async function uploadOne(
     item: UploadItem,
   ): Promise<void> {
     if (!creator) {
       return Promise.resolve();
     }
 
-    return new Promise((resolve) => {
-      const request = new XMLHttpRequest();
+    setFiles((previous) =>
+      previous.map((entry) =>
+        entry.id === item.id
+          ? {
+              ...entry,
+              status: "uploading",
+              progress: 0,
+              message: undefined,
+            }
+          : entry,
+      ),
+    );
 
-      requestRefs.current.set(item.id, request);
+    try {
+      const headBuffer = await item.file
+        .slice(0, 4096)
+        .arrayBuffer();
+      const headBytes = new Uint8Array(headBuffer);
+      let binary = "";
+      const chunkSize = 0x8000;
 
-      setFiles((previous) =>
-        previous.map((entry) =>
-          entry.id === item.id
-            ? {
-                ...entry,
-                status: "uploading",
-                progress: 0,
-                message: undefined,
-              }
-            : entry,
-        ),
-      );
+      for (
+        let index = 0;
+        index < headBytes.length;
+        index += chunkSize
+      ) {
+        const chunk = headBytes.subarray(
+          index,
+          Math.min(index + chunkSize, headBytes.length),
+        );
+        binary += String.fromCharCode(...chunk);
+      }
 
-      const metadata = encodeUploadMetadata({
+      const headBase64 = btoa(binary)
+        .replace(/\+/g, "-")
+        .replace(/\//g, "_")
+        .replace(/=+$/g, "");
+
+      const metadata = {
         filename: item.file.name,
         mimeType:
           item.file.type || "application/octet-stream",
@@ -441,25 +461,257 @@ export function VideoUploadForm({
         publish: uploadMode === "publish",
         summary: summary.trim() || null,
         tagIds,
+        headBase64,
+      };
+
+      const prepareResponse = await fetch(
+        "/api/admin/videos/upload/prepare",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(metadata),
+        },
+      );
+
+      const prepared = (await prepareResponse
+        .json()) as {
+        data?: {
+          mode?: "direct" | "proxy";
+          contentId?: string;
+          slug?: string;
+          objectKey?: string;
+          authorization?: {
+            url: string;
+            method: string;
+            headers?: Record<string, string>;
+          };
+        };
+        error?: { message?: string };
+      };
+
+      if (!prepareResponse.ok) {
+        throw new Error(
+          prepared.error?.message ??
+            "The upload could not be prepared.",
+        );
+      }
+
+      if (prepared.data?.mode === "proxy") {
+        await uploadThroughApplication(
+          item,
+          encodeUploadMetadata({
+            filename: item.file.name,
+            mimeType:
+              item.file.type || "application/octet-stream",
+            sizeBytes: item.file.size,
+            title: item.title.trim(),
+            creatorId: creator.id,
+            categoryId,
+            publish: uploadMode === "publish",
+            summary: summary.trim() || null,
+            tagIds,
+          }),
+        );
+        return;
+      }
+
+      const authorization =
+        prepared.data?.authorization;
+      const contentId =
+        prepared.data?.contentId;
+      const slug = prepared.data?.slug;
+
+      if (
+        !authorization?.url ||
+        !contentId ||
+        !prepared.data?.objectKey
+      ) {
+        throw new Error(
+          "The storage upload authorization was incomplete.",
+        );
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        const request = new XMLHttpRequest();
+        requestRefs.current.set(item.id, request);
+
+        request.upload.addEventListener(
+          "progress",
+          (event) => {
+            if (!event.lengthComputable) return;
+
+            const progress = Math.min(
+              95,
+              Math.round(
+                (event.loaded / event.total) * 95,
+              ),
+            );
+
+            setFiles((previous) =>
+              previous.map((entry) =>
+                entry.id === item.id
+                  ? { ...entry, progress }
+                  : entry,
+              ),
+            );
+          },
+        );
+
+        request.addEventListener(
+          "load",
+          () => {
+            requestRefs.current.delete(item.id);
+
+            if (
+              request.status >= 200 &&
+              request.status < 300
+            ) {
+              resolve();
+            } else {
+              reject(
+                new Error(
+                  `Storage upload failed (${request.status}).`,
+                ),
+              );
+            }
+          },
+        );
+
+        request.addEventListener(
+          "error",
+          () => {
+            requestRefs.current.delete(item.id);
+            reject(
+              new Error(
+                "The connection dropped before the file finished.",
+              ),
+            );
+          },
+        );
+
+        request.addEventListener(
+          "abort",
+          () => {
+            requestRefs.current.delete(item.id);
+            reject(new Error("Upload cancelled."));
+          },
+        );
+
+        request.open(
+          authorization.method || "PUT",
+          authorization.url,
+        );
+
+        for (const [name, value] of Object.entries(
+          authorization.headers ?? {},
+        )) {
+          request.setRequestHeader(name, value);
+        }
+
+        request.send(item.file);
       });
+
+      setFiles((previous) =>
+        previous.map((entry) =>
+          entry.id === item.id
+            ? { ...entry, progress: 97 }
+            : entry,
+        ),
+      );
+
+      const finalizeResponse = await fetch(
+        "/api/admin/videos/upload/finalize",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            contentId,
+            objectKey:
+              prepared.data.objectKey,
+            filename: item.file.name,
+            mimeType:
+              item.file.type || "application/octet-stream",
+            sizeBytes: item.file.size,
+          }),
+        },
+      );
+
+      const finalized = (await finalizeResponse
+        .json()) as {
+        data?: {
+          contentId?: string;
+          slug?: string;
+        };
+        error?: { message?: string };
+      };
+
+      if (!finalizeResponse.ok || !finalized.data?.contentId) {
+        throw new Error(
+          finalized.error?.message ??
+            "The uploaded file could not be finalized.",
+        );
+      }
+
+      setFiles((previous) =>
+        previous.map((entry) =>
+          entry.id === item.id
+            ? {
+                ...entry,
+                status: "uploaded",
+                progress: 100,
+                contentId:
+                  finalized.data?.contentId ?? contentId,
+                slug:
+                  finalized.data?.slug ?? slug,
+              }
+            : entry,
+        ),
+      );
+    } catch (error) {
+      requestRefs.current.delete(item.id);
+
+      setFiles((previous) =>
+        previous.map((entry) =>
+          entry.id === item.id
+            ? {
+                ...entry,
+                status: "error",
+                message:
+                  error instanceof Error
+                    ? error.message
+                    : "The upload failed. Try again.",
+              }
+            : entry,
+        ),
+      );
+    }
+  }
+
+  async function uploadThroughApplication(
+    item: UploadItem,
+    metadata: string,
+  ): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const request = new XMLHttpRequest();
+      requestRefs.current.set(item.id, request);
 
       request.upload.addEventListener(
         "progress",
         (event) => {
-          if (!event.lengthComputable) {
-            return;
-          }
-
-          const progress = Math.round(
-            (event.loaded / event.total) * 100,
-          );
+          if (!event.lengthComputable) return;
 
           setFiles((previous) =>
             previous.map((entry) =>
               entry.id === item.id
                 ? {
                     ...entry,
-                    progress,
+                    progress: Math.round(
+                      (event.loaded / event.total) * 100,
+                    ),
                   }
                 : entry,
             ),
@@ -467,141 +719,84 @@ export function VideoUploadForm({
         },
       );
 
-      request.addEventListener(
-        "load",
-        () => {
-          requestRefs.current.delete(item.id);
+      request.addEventListener("load", () => {
+        requestRefs.current.delete(item.id);
 
-          try {
-            const parsed = JSON.parse(
-              request.responseText,
-            ) as {
-              data?: {
-                contentId?: string;
-                slug?: string;
-              };
-              error?: {
-                message?: string;
-              };
+        try {
+          const parsed = JSON.parse(
+            request.responseText,
+          ) as {
+            data?: {
+              contentId?: string;
+              slug?: string;
             };
+            error?: { message?: string };
+          };
 
-            if (
-              request.status >= 200 &&
-              request.status < 300 &&
-              parsed.data?.contentId
-            ) {
-              setFiles((previous) =>
-                previous.map((entry) =>
-                  entry.id === item.id
-                    ? {
-                        ...entry,
-                        status: "uploaded",
-                        progress: 100,
-                        contentId:
-                          parsed.data?.contentId,
-                        slug: parsed.data?.slug,
-                      }
-                    : entry,
-                ),
-              );
-            } else {
-              setFiles((previous) =>
-                previous.map((entry) =>
-                  entry.id === item.id
-                    ? {
-                        ...entry,
-                        status: "error",
-                        message:
-                          parsed.error?.message ??
-                          "The upload was refused. Try again.",
-                      }
-                    : entry,
-                ),
-              );
-            }
-          } catch {
+          if (
+            request.status >= 200 &&
+            request.status < 300 &&
+            parsed.data?.contentId
+          ) {
             setFiles((previous) =>
               previous.map((entry) =>
                 entry.id === item.id
                   ? {
                       ...entry,
-                      status: "error",
-                      message:
-                        "The server sent an unreadable response.",
+                      status: "uploaded",
+                      progress: 100,
+                      contentId:
+                        parsed.data?.contentId,
+                      slug: parsed.data?.slug,
                     }
                   : entry,
               ),
             );
+            resolve();
+            return;
           }
 
-          resolve();
-        },
-      );
-
-      request.addEventListener(
-        "error",
-        () => {
-          requestRefs.current.delete(item.id);
-
-          setFiles((previous) =>
-            previous.map((entry) =>
-              entry.id === item.id
-                ? {
-                    ...entry,
-                    status: "error",
-                    message:
-                      "The connection dropped before the file finished.",
-                  }
-                : entry,
+          reject(
+            new Error(
+              parsed.error?.message ??
+                "The upload was refused. Try again.",
             ),
           );
-
-          resolve();
-        },
-      );
-
-      request.addEventListener(
-        "abort",
-        () => {
-          requestRefs.current.delete(item.id);
-
-          setFiles((previous) =>
-            previous.map((entry) =>
-              entry.id === item.id
-                ? {
-                    ...entry,
-                    status: "error",
-                    message: "Upload cancelled.",
-                  }
-                : entry,
+        } catch {
+          reject(
+            new Error(
+              "The server sent an unreadable response.",
             ),
           );
+        }
+      });
 
-          resolve();
-        },
-      );
+      request.addEventListener("error", () => {
+        requestRefs.current.delete(item.id);
+        reject(
+          new Error(
+            "The connection dropped before the file finished.",
+          ),
+        );
+      });
+
+      request.addEventListener("abort", () => {
+        requestRefs.current.delete(item.id);
+        reject(new Error("Upload cancelled."));
+      });
 
       request.open(
         "POST",
         "/api/admin/videos/upload",
       );
-
-      /*
-       * The video is sent as the raw request body.
-       * Metadata is sent separately so the server
-       * can stream the large video directly to disk
-       * without parsing multipart/form-data.
-       */
       request.setRequestHeader(
         "Content-Type",
         "application/octet-stream",
       );
-
       request.setRequestHeader(
         "X-Video-Metadata",
         metadata,
       );
-
       request.send(item.file);
     });
   }
