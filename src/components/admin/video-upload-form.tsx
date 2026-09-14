@@ -119,9 +119,6 @@ export function VideoUploadForm({
   const [summary, setSummary] =
     useState("");
 
-  const [uploadMode, setUploadMode] =
-    useState<UploadMode>("upload");
-
   const [uploading, setUploading] =
     useState(false);
 
@@ -407,6 +404,7 @@ export function VideoUploadForm({
 
   async function uploadOne(
     item: UploadItem,
+    mode: UploadMode,
   ): Promise<void> {
     if (!creator) {
       return Promise.resolve();
@@ -458,7 +456,7 @@ export function VideoUploadForm({
         title: item.title.trim(),
         creatorId: creator.id,
         categoryId,
-        publish: uploadMode === "publish",
+        publish: mode === "publish",
         summary: summary.trim() || null,
         tagIds,
         headBase64,
@@ -509,7 +507,7 @@ export function VideoUploadForm({
             title: item.title.trim(),
             creatorId: creator.id,
             categoryId,
-            publish: uploadMode === "publish",
+            publish: mode === "publish",
             summary: summary.trim() || null,
             tagIds,
           }),
@@ -806,8 +804,6 @@ export function VideoUploadForm({
   ) {
     if (uploading) return;
 
-    setUploadMode(mode);
-
     if (!validate()) {
       return;
     }
@@ -837,7 +833,7 @@ export function VideoUploadForm({
      * predictable when uploading many large videos.
      */
     for (const item of pendingFiles) {
-      await uploadOne(item);
+      await uploadOne(item, mode);
     }
 
     setUploading(false);
