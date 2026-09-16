@@ -477,6 +477,7 @@ export function VideoUploadForm({
         .json()) as {
         data?: {
           mode?: "direct" | "proxy";
+          uploadType?: "single" | "multipart";
           contentId?: string;
           slug?: string;
           objectKey?: string;
@@ -484,6 +485,15 @@ export function VideoUploadForm({
             url: string;
             method: string;
             headers?: Record<string, string>;
+          } | {
+            uploadId: string;
+            partSizeBytes: number;
+            parts: Array<{
+              partNumber: number;
+              url: string;
+              method: string;
+              headers?: Record<string, string>;
+            }>;
           };
         };
         error?: { message?: string };
@@ -520,96 +530,378 @@ export function VideoUploadForm({
       const contentId =
         prepared.data?.contentId;
       const slug = prepared.data?.slug;
+      const objectKey =
+        prepared.data?.objectKey;
+      const uploadType =
+        prepared.data?.uploadType ?? "single";
 
       if (
-        !authorization?.url ||
+        !authorization ||
         !contentId ||
-        !prepared.data?.objectKey
+        !objectKey
       ) {
         throw new Error(
           "The storage upload authorization was incomplete.",
         );
       }
 
-      await new Promise<void>((resolve, reject) => {
-        const request = new XMLHttpRequest();
-        requestRefs.current.set(item.id, request);
-
-        request.upload.addEventListener(
-          "progress",
-          (event) => {
-            if (!event.lengthComputable) return;
-
-            const progress = Math.min(
-              95,
-              Math.round(
-                (event.loaded / event.total) * 95,
-              ),
-            );
-
-            setFiles((previous) =>
-              previous.map((entry) =>
-                entry.id === item.id
-                  ? { ...entry, progress }
-                  : entry,
-              ),
-            );
-          },
-        );
-
-        request.addEventListener(
-          "load",
-          () => {
-            requestRefs.current.delete(item.id);
-
-            if (
-              request.status >= 200 &&
-              request.status < 300
-            ) {
-              resolve();
-            } else {
-              reject(
-                new Error(
-                  `Storage upload failed (${request.status}).`,
-                ),
-              );
-            }
-          },
-        );
-
-        request.addEventListener(
-          "error",
-          () => {
-            requestRefs.current.delete(item.id);
-            reject(
-              new Error(
-                "The connection dropped before the file finished.",
-              ),
-            );
-          },
-        );
-
-        request.addEventListener(
-          "abort",
-          () => {
-            requestRefs.current.delete(item.id);
-            reject(new Error("Upload cancelled."));
-          },
-        );
-
-        request.open(
-          authorization.method || "PUT",
-          authorization.url,
-        );
-
-        for (const [name, value] of Object.entries(
-          authorization.headers ?? {},
-        )) {
-          request.setRequestHeader(name, value);
+      if (uploadType === "multipart") {
+        if (
+          !("uploadId" in authorization) ||
+          !authorization.uploadId ||
+          !Number.isFinite(
+            authorization.partSizeBytes,
+          ) ||
+          authorization.partSizeBytes <= 0 ||
+          !Array.isArray(authorization.parts) ||
+          authorization.parts.length === 0
+        ) {
+          throw new Error(
+            "The multipart upload authorization was incomplete.",
+          );
         }
 
-        request.send(item.file);
-      });
+        let uploadedBytes = 0;
+        const completedParts: Array<{
+          partNumber: number;
+          etag: string;
+        }> = [];
+
+        for (const part of authorization.parts) {
+          const start =
+            (part.partNumber - 1) *
+            authorization.partSizeBytes;
+          const end = Math.min(
+            start + authorization.partSizeBytes,
+            item.file.size,
+          );
+
+          if (
+            part.partNumber < 1 ||
+            start >= item.file.size ||
+            end <= start
+          ) {
+            throw new Error(
+              `Invalid multipart part ${part.partNumber}.`,
+            );
+          }
+
+          const partBlob = item.file.slice(
+            start,
+            end,
+          );
+
+          const etag =
+            await new Promise<string>(
+              (resolve, reject) => {
+                const request =
+                  new XMLHttpRequest();
+
+                requestRefs.current.set(
+                  item.id,
+                  request,
+                );
+
+                request.upload.addEventListener(
+                  "progress",
+                  (event) => {
+                    if (
+                      !event.lengthComputable
+                    ) {
+                      return;
+                    }
+
+                    const progress = Math.min(
+                      95,
+                      Math.round(
+                        ((uploadedBytes +
+                          event.loaded) /
+                          item.file.size) *
+                          95,
+                      ),
+                    );
+
+                    setFiles((previous) =>
+                      previous.map(
+                        (entry) =>
+                          entry.id === item.id
+                            ? {
+                                ...entry,
+                                progress,
+                              }
+                            : entry,
+                      ),
+                    );
+                  },
+                );
+
+                request.addEventListener(
+                  "load",
+                  () => {
+                    requestRefs.current.delete(
+                      item.id,
+                    );
+
+                    if (
+                      request.status >= 200 &&
+                      request.status < 300
+                    ) {
+                      const responseEtag =
+                        request.getResponseHeader(
+                          "ETag",
+                        );
+
+                      if (!responseEtag) {
+                        reject(
+                          new Error(
+                            `Multipart part ${part.partNumber} uploaded but no ETag was returned.`,
+                          ),
+                        );
+                        return;
+                      }
+
+                      resolve(responseEtag);
+                    } else {
+                      reject(
+                        new Error(
+                          `Storage part ${part.partNumber} upload failed (${request.status}).`,
+                        ),
+                      );
+                    }
+                  },
+                );
+
+                request.addEventListener(
+                  "error",
+                  () => {
+                    requestRefs.current.delete(
+                      item.id,
+                    );
+                    reject(
+                      new Error(
+                        "The connection dropped before the file part finished.",
+                      ),
+                    );
+                  },
+                );
+
+                request.addEventListener(
+                  "abort",
+                  () => {
+                    requestRefs.current.delete(
+                      item.id,
+                    );
+                    reject(
+                      new Error(
+                        "Upload cancelled.",
+                      ),
+                    );
+                  },
+                );
+
+                request.open(
+                  part.method || "PUT",
+                  part.url,
+                );
+
+                for (const [
+                  name,
+                  value,
+                ] of Object.entries(
+                  part.headers ?? {},
+                )) {
+                  request.setRequestHeader(
+                    name,
+                    value,
+                  );
+                }
+
+                request.send(partBlob);
+              },
+            );
+
+          uploadedBytes +=
+            partBlob.size;
+
+          setFiles((previous) =>
+            previous.map((entry) =>
+              entry.id === item.id
+                ? {
+                    ...entry,
+                    progress: Math.min(
+                      95,
+                      Math.round(
+                        (uploadedBytes /
+                          item.file.size) *
+                          95,
+                      ),
+                    ),
+                  }
+                : entry,
+            ),
+          );
+
+          completedParts.push({
+            partNumber: part.partNumber,
+            etag,
+          });
+        }
+
+        const completeResponse = await fetch(
+          "/api/admin/videos/upload/complete",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              contentId,
+              objectKey,
+              uploadId:
+                authorization.uploadId,
+              parts: completedParts,
+            }),
+          },
+        );
+
+        const completed =
+          (await completeResponse.json()) as {
+            data?: {
+              contentId?: string;
+            };
+            error?: {
+              message?: string;
+            };
+          };
+
+        if (
+          !completeResponse.ok ||
+          !completed.data?.contentId
+        ) {
+          throw new Error(
+            completed.error?.message ??
+              "The multipart upload could not be completed.",
+          );
+        }
+      } else {
+        if (
+          !("url" in authorization) ||
+          !authorization.url
+        ) {
+          throw new Error(
+            "The storage upload authorization was incomplete.",
+          );
+        }
+
+        await new Promise<void>(
+          (resolve, reject) => {
+            const request =
+              new XMLHttpRequest();
+
+            requestRefs.current.set(
+              item.id,
+              request,
+            );
+
+            request.upload.addEventListener(
+              "progress",
+              (event) => {
+                if (!event.lengthComputable)
+                  return;
+
+                const progress = Math.min(
+                  95,
+                  Math.round(
+                    (event.loaded /
+                      event.total) *
+                      95,
+                  ),
+                );
+
+                setFiles((previous) =>
+                  previous.map((entry) =>
+                    entry.id === item.id
+                      ? {
+                          ...entry,
+                          progress,
+                        }
+                      : entry,
+                  ),
+                );
+              },
+            );
+
+            request.addEventListener(
+              "load",
+              () => {
+                requestRefs.current.delete(
+                  item.id,
+                );
+
+                if (
+                  request.status >= 200 &&
+                  request.status < 300
+                ) {
+                  resolve();
+                } else {
+                  reject(
+                    new Error(
+                      `Storage upload failed (${request.status}).`,
+                    ),
+                  );
+                }
+              },
+            );
+
+            request.addEventListener(
+              "error",
+              () => {
+                requestRefs.current.delete(
+                  item.id,
+                );
+                reject(
+                  new Error(
+                    "The connection dropped before the file finished.",
+                  ),
+                );
+              },
+            );
+
+            request.addEventListener(
+              "abort",
+              () => {
+                requestRefs.current.delete(
+                  item.id,
+                );
+                reject(
+                  new Error(
+                    "Upload cancelled.",
+                  ),
+                );
+              },
+            );
+
+            request.open(
+              authorization.method || "PUT",
+              authorization.url,
+            );
+
+            for (const [
+              name,
+              value,
+            ] of Object.entries(
+              authorization.headers ?? {},
+            )) {
+              request.setRequestHeader(
+                name,
+                value,
+              );
+            }
+
+            request.send(item.file);
+          },
+        );
+      }
 
       setFiles((previous) =>
         previous.map((entry) =>
@@ -628,11 +920,11 @@ export function VideoUploadForm({
           },
           body: JSON.stringify({
             contentId,
-            objectKey:
-              prepared.data.objectKey,
+            objectKey,
             filename: item.file.name,
             mimeType:
-              item.file.type || "application/octet-stream",
+              item.file.type ||
+              "application/octet-stream",
             sizeBytes: item.file.size,
           }),
         },

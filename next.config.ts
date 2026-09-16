@@ -28,6 +28,20 @@ const config: NextConfig = {
         port: "3001",
       },
 
+      /*
+       * Cloudflare R2 object storage.
+       *
+       * R2 signed URLs use hostnames such as:
+       * <bucket>.<account-id>.r2.cloudflarestorage.com
+       */
+      {
+        protocol: "https",
+        hostname: "**.r2.cloudflarestorage.com",
+      },
+
+      /*
+       * Optional custom/public media hosts.
+       */
       ...(process.env.NEXT_PUBLIC_MEDIA_HOSTS ?? "")
         .split(",")
         .map((host) => host.trim())

@@ -42,6 +42,8 @@ import {
   storagePaths,
 } from "@/lib/media/paths";
 
+import { S3MediaProvider } from "@/lib/media/s3-provider";
+
 import {
   uniqueSlug,
   slugify,
@@ -735,34 +737,48 @@ export async function POST(
       );
 
     /*
-     * Final local filesystem path.
+     * Persist the uploaded source according to the configured
+     * media provider.
+     *
+     * S3/R2 uploads are sent from the temporary local file and the
+     * local temporary copy is removed after a successful upload.
+     * Local storage keeps the existing final filesystem layout.
      */
-    finalPath =
-      path.join(
-        serverEnv()
-          .MEDIA_LOCAL_ROOT,
+    if (serverEnv().MEDIA_PROVIDER === "s3") {
+      const provider = new S3MediaProvider();
+
+      await provider.putFile(
         objectKey,
+        tempPath,
+        check.detectedMime,
       );
 
-    await mkdir(
-      path.dirname(
+      await unlink(tempPath);
+      tempPath = null;
+    } else {
+      finalPath =
+        path.join(
+          serverEnv()
+            .MEDIA_LOCAL_ROOT,
+          objectKey,
+        );
+
+      await mkdir(
+        path.dirname(
+          finalPath,
+        ),
+        {
+          recursive: true,
+        },
+      );
+
+      await rename(
+        tempPath,
         finalPath,
-      ),
-      {
-        recursive: true,
-      },
-    );
+      );
 
-    /*
-     * Move the completed temporary upload
-     * into its final source location.
-     */
-    await rename(
-      tempPath,
-      finalPath,
-    );
-
-    tempPath = null;
+      tempPath = null;
+    }
 
     /*
      * Create source media asset.
@@ -781,9 +797,9 @@ export async function POST(
               : "LOCAL",
 
           bucket:
-            serverEnv()
-              .STORAGE_BUCKET ??
-            null,
+            serverEnv().MEDIA_PROVIDER === "s3"
+              ? serverEnv().STORAGE_BUCKET ?? null
+              : null,
 
           objectKey,
 

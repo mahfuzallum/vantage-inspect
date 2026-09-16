@@ -25,9 +25,9 @@ import {
   RotateCw,
   Volume2,
   VolumeX,
+  PictureInPicture,
 } from "lucide-react";
 import { formatDuration } from "@/lib/utils/format";
-import { hasNativeHlsSupport } from "@/lib/media/hls";
 import { cn } from "@/lib/utils/cn";
 
 export type PlayerState =
@@ -104,6 +104,13 @@ export function MediaPlayer({
   const mediaRef =
     useRef<HTMLVideoElement>(null);
 
+  const autoplayRef =
+    useRef(autoplay);
+
+  useEffect(() => {
+    autoplayRef.current = autoplay;
+  }, [autoplay]);
+
   const containerRef =
     useRef<HTMLDivElement>(null);
 
@@ -154,6 +161,9 @@ export function MediaPlayer({
   const [isFullscreen, setIsFullscreen] =
     useState(false);
 
+  const [isPictureInPicture, setIsPictureInPicture] =
+    useState(false);
+
   const [showControls, setShowControls] =
     useState(true);
 
@@ -188,6 +198,18 @@ export function MediaPlayer({
   const [isSeeking, setIsSeeking] =
     useState(false);
 
+  const [showSeekPreview, setShowSeekPreview] =
+    useState(false);
+
+  const [seekPreviewTime, setSeekPreviewTime] =
+    useState(0);
+
+  const seekPreviewRef =
+    useRef<HTMLVideoElement>(null);
+
+  const progressTrackRef =
+    useRef<HTMLDivElement>(null);
+
   const hlsRef = useRef<{
     destroy: () => void;
     levels: unknown[];
@@ -204,6 +226,42 @@ export function MediaPlayer({
 
   const isAudio =
     kind === "AUDIO";
+
+  const playbackPositionKey =
+    !isAudio && (src || hlsSrc)
+      ? `archive-player-position:${src ?? hlsSrc}`
+      : null;
+
+  const lastSavedPositionRef =
+    useRef(0);
+
+  const savePlaybackPosition =
+    useCallback(() => {
+      const media =
+        mediaRef.current;
+
+      if (
+        !media ||
+        !playbackPositionKey ||
+        !Number.isFinite(media.duration) ||
+        media.duration <= 0 ||
+        !Number.isFinite(media.currentTime)
+      ) {
+        return;
+      }
+
+      try {
+        window.localStorage.setItem(
+          playbackPositionKey,
+          String(media.currentTime),
+        );
+
+        lastSavedPositionRef.current =
+          media.currentTime;
+      } catch {
+        // Ignore storage failures.
+      }
+    }, [playbackPositionKey]);
 
   const busy =
     state === "loading" ||
@@ -333,6 +391,12 @@ export function MediaPlayer({
 
   /*
    * HLS setup and recovery.
+   *
+   * Use HLS.js whenever Media Source Extensions are available. This avoids
+   * browser-specific native-HLS behavior in Chromium where an HLS stream can
+   * report a progressing timeline/audio while video frames are not rendered.
+   *
+   * Safari/iOS can use native HLS when HLS.js cannot use MSE.
    */
   useEffect(() => {
     const media =
@@ -342,7 +406,6 @@ export function MediaPlayer({
       return;
     }
 
-    // Reset fallback whenever the actual media source changes.
     hlsFallbackRef.current = false;
 
     let cancelled = false;
@@ -365,21 +428,28 @@ export function MediaPlayer({
       };
 
     const fallbackToOriginal = () => {
-      if (cancelled || !src || hlsFallbackRef.current) {
+      if (
+        cancelled ||
+        !src ||
+        hlsFallbackRef.current
+      ) {
         return false;
       }
 
       hlsFallbackRef.current = true;
       clearRetryTimer();
+
       hlsRef.current?.destroy();
       hlsRef.current = null;
 
       media.pause();
       media.src = src;
       media.load();
+
       setLevels([]);
       setCurrentLevel(-1);
       setState("loading");
+
       return true;
     };
 
@@ -393,7 +463,11 @@ export function MediaPlayer({
             !cancelled &&
             retryCountRef.current >= 3
           ) {
-            setState("failed");
+            if (src) {
+              fallbackToOriginal();
+            } else {
+              setState("failed");
+            }
           }
 
           return;
@@ -437,50 +511,6 @@ export function MediaPlayer({
     media.removeAttribute("src");
     media.load();
 
-    media.volume = volume;
-    media.muted = muted;
-
-    /*
-     * If HLS already failed for this source, use the original MP4/source.
-     */
-    if (hlsFallbackRef.current && src) {
-      media.src = src;
-      media.load();
-      return () => {
-        cancelled = true;
-        clearRetryTimer();
-        media.pause();
-        media.removeAttribute("src");
-      };
-    }
-
-    /*
-     * Safari / native HLS.
-     */
-    if (hasNativeHlsSupport(media)) {
-      media.src = hlsSrc;
-      media.load();
-
-      return () => {
-        cancelled = true;
-
-        clearRetryTimer();
-
-        media.pause();
-        media.removeAttribute(
-          "src",
-        );
-
-        /*
-         * Do not call load() during
-         * native-HLS teardown.
-         */
-      };
-    }
-
-    /*
-     * HLS.js fallback.
-     */
     void (async () => {
       try {
         const { default: Hls } =
@@ -494,171 +524,239 @@ export function MediaPlayer({
           return;
         }
 
-        if (!Hls.isSupported()) {
-          setState("failed");
-          return;
-        }
+        /*
+         * Chromium/Firefox/Edge:
+         * HLS.js + MSE is the primary playback path.
+         */
+        if (Hls.isSupported()) {
+          const hls =
+            new Hls({
+              enableWorker: true,
+              lowLatencyMode: false,
 
-        const hls =
-          new Hls({
-            enableWorker: true,
-            lowLatencyMode: false,
+              startLevel: -1,
 
-            maxBufferLength: 30,
-            maxMaxBufferLength: 60,
-            backBufferLength: 30,
+              maxBufferLength: 30,
+              maxMaxBufferLength: 60,
+              backBufferLength: 30,
 
-            nudgeOffset: 0.1,
-            nudgeMaxRetry: 5,
-            maxFragLookUpTolerance:
-              0.25,
+              maxBufferHole: 0.5,
+              maxStarvationDelay: 4,
+              maxLoadingDelay: 4,
 
-            startLevel: -1,
+              nudgeOffset: 0.1,
+              nudgeMaxRetry: 5,
+              maxFragLookUpTolerance:
+                0.25,
 
-            manifestLoadingMaxRetry:
-              4,
+              manifestLoadingMaxRetry:
+                4,
+              levelLoadingMaxRetry:
+                4,
+              fragLoadingMaxRetry:
+                6,
 
-            levelLoadingMaxRetry:
-              4,
+              manifestLoadingRetryDelay:
+                1000,
+              levelLoadingRetryDelay:
+                1000,
+              fragLoadingRetryDelay:
+                1000,
+            });
 
-            fragLoadingMaxRetry:
-              4,
+          hlsRef.current =
+            hls as unknown as typeof hlsRef.current;
 
-            manifestLoadingRetryDelay:
-              1000,
-
-            levelLoadingRetryDelay:
-              1000,
-
-            fragLoadingRetryDelay:
-              1000,
-          });
-
-        hlsRef.current =
-          hls as unknown as typeof hlsRef.current;
-
-        hls.loadSource(hlsSrc);
-        hls.attachMedia(media);
-
-        hls.on(
-          Hls.Events.MANIFEST_PARSED,
-          () => {
-            if (
-              cancelled ||
-              generation !==
-                hlsGenerationRef.current
-            ) {
-              return;
-            }
-
-            setLevels(
-              hls.levels
-                .map(
-                  (
-                    level,
-                    index,
-                  ) => ({
-                    index,
-                    height:
-                      level.height,
-                    label:
-                      `${level.height}p`,
-                  }),
-                )
-                .filter(
-                  (level) =>
-                    Number.isFinite(
-                      level.height,
-                    ) &&
-                    level.height > 0,
-                )
-                .sort(
-                  (a, b) =>
-                    a.height -
-                    b.height,
-                ),
-            );
-
-            setState(
-              (previous) =>
-                previous ===
-                  "failed" ||
-                previous ===
-                  "loading"
-                  ? "loading"
-                  : previous,
-            );
-          },
-        );
-
-        hls.on(
-          Hls.Events.ERROR,
-          (_event, data) => {
-            if (
-              cancelled ||
-              generation !==
-                hlsGenerationRef.current ||
-              !data.fatal
-            ) {
-              return;
-            }
-
-            /*
-             * Network error:
-             * keep the same HLS instance.
-             */
-            if (
-              data.type ===
-              Hls.ErrorTypes.NETWORK_ERROR
-            ) {
-              // A missing local master playlist is a permanent source error,
-              // not a transient network outage. Prefer the original source
-              // when one is available so older records remain playable.
-              if (fallbackToOriginal()) {
+          /*
+           * Attach the media element first. Loading the source from the
+           * MEDIA_ATTACHED callback prevents the initial manifest/buffer race.
+           */
+          hls.on(
+            Hls.Events.MEDIA_ATTACHED,
+            () => {
+              if (
+                cancelled ||
+                generation !==
+                  hlsGenerationRef.current
+              ) {
                 return;
               }
 
-              try {
-                hls.startLoad();
+              hls.loadSource(hlsSrc);
+              hls.startLoad();
+            },
+          );
 
-                setState(
-                  "buffering",
-                );
-              } catch {
-                scheduleFullRetry(
-                  1200,
-                );
+          hls.on(
+            Hls.Events.MANIFEST_PARSED,
+            () => {
+              if (
+                cancelled ||
+                generation !==
+                  hlsGenerationRef.current
+              ) {
+                return;
               }
 
-              return;
-            }
+              setLevels(
+                hls.levels
+                  .map(
+                    (
+                      level,
+                      index,
+                    ) => ({
+                      index,
+                      height:
+                        level.height,
+                      label:
+                        level.height > 0
+                          ? `${level.height}p`
+                          : "Auto",
+                    }),
+                  )
+                  .filter(
+                    (level) =>
+                      Number.isFinite(
+                        level.height,
+                      ) &&
+                      level.height > 0,
+                  )
+                  .sort(
+                    (a, b) =>
+                      a.height -
+                      b.height,
+                  ),
+              );
 
-            /*
-             * Decoder/media error:
-             * recover without destroying
-             * the entire HLS pipeline.
-             */
-            if (
-              data.type ===
-              Hls.ErrorTypes.MEDIA_ERROR
-            ) {
-              try {
-                hls.recoverMediaError();
-              } catch {
-                scheduleFullRetry(
-                  800,
-                );
+              setState(
+                (previous) =>
+                  previous ===
+                    "failed" ||
+                  previous ===
+                    "playing"
+                    ? previous
+                    : "loading",
+              );
+
+              if (autoplayRef.current) {
+                void media.play().catch(() => {
+                  // Browser autoplay policy may require user interaction.
+                });
+              }
+            },
+          );
+
+          hls.on(
+            Hls.Events.FRAG_BUFFERED,
+            () => {
+              if (
+                cancelled ||
+                generation !==
+                  hlsGenerationRef.current
+              ) {
+                return;
               }
 
-              return;
-            }
+              if (
+                !media.paused &&
+                media.readyState >= 2
+              ) {
+                setState("playing");
+              } else {
+                setState((previous) =>
+                  previous === "failed"
+                    ? previous
+                    : "ready",
+                );
+              }
+            },
+          );
 
-            /*
-             * Unknown fatal error.
-             */
-            scheduleFullRetry(800);
-          },
-        );
+          hls.on(
+            Hls.Events.ERROR,
+            (_event, data) => {
+              if (
+                cancelled ||
+                generation !==
+                  hlsGenerationRef.current ||
+                !data.fatal
+              ) {
+                return;
+              }
+
+              if (
+                data.type ===
+                Hls.ErrorTypes.NETWORK_ERROR
+              ) {
+                try {
+                  hls.startLoad(
+                    media.currentTime,
+                  );
+                  setState("buffering");
+                } catch {
+                  scheduleFullRetry(1000);
+                }
+
+                return;
+              }
+
+              if (
+                data.type ===
+                Hls.ErrorTypes.MEDIA_ERROR
+              ) {
+                try {
+                  hls.recoverMediaError();
+                  setState("buffering");
+                } catch {
+                  scheduleFullRetry(800);
+                }
+
+                return;
+              }
+
+              scheduleFullRetry(800);
+            },
+          );
+
+          hls.attachMedia(media);
+
+          return;
+        }
+
+        /*
+         * Safari/iOS fallback:
+         * use native HLS only when HLS.js/MSE is unavailable.
+         */
+        const canUseNativeHls =
+          Boolean(
+            media.canPlayType(
+              "application/vnd.apple.mpegurl",
+            ) ||
+              media.canPlayType(
+                "application/x-mpegURL",
+              ),
+          );
+
+        if (canUseNativeHls) {
+          media.src = hlsSrc;
+          media.load();
+
+          if (autoplayRef.current) {
+            void media.play().catch(() => {
+              // Browser autoplay policy may require user interaction.
+            });
+          }
+
+          return;
+        }
+
+        if (!cancelled) {
+          if (src) {
+            fallbackToOriginal();
+          } else {
+            setState("failed");
+          }
+        }
       } catch {
         if (!cancelled) {
           scheduleFullRetry(800);
@@ -682,8 +780,6 @@ export function MediaPlayer({
     src,
     hlsSrc,
     reloadAttempt,
-    volume,
-    muted,
   ]);
 
   /*
@@ -786,6 +882,34 @@ export function MediaPlayer({
     }, [volume, muted]);
 
   /*
+   * Save the latest position when the tab is hidden or the player unmounts.
+   */
+  useEffect(() => {
+    const handleVisibilityChange =
+      () => {
+        if (
+          document.visibilityState ===
+          "hidden"
+        ) {
+          savePlaybackPosition();
+        }
+      };
+
+    document.addEventListener(
+      "visibilitychange",
+      handleVisibilityChange,
+    );
+
+    return () => {
+      document.removeEventListener(
+        "visibilitychange",
+        handleVisibilityChange,
+      );
+      savePlaybackPosition();
+    };
+  }, [savePlaybackPosition]);
+
+  /*
    * Fullscreen state.
    */
   useEffect(() => {
@@ -807,6 +931,48 @@ export function MediaPlayer({
         onFullscreenChange,
       );
   }, []);
+
+  /*
+   * Picture-in-Picture events.
+   *
+   * React's JSX typings do not expose the browser PiP event handlers in
+   * this setup, so listen to the native media events directly.
+   */
+  useEffect(() => {
+    const media = mediaRef.current;
+
+    if (!media) {
+      return;
+    }
+
+    const handleEnter = () => {
+      setIsPictureInPicture(true);
+    };
+
+    const handleLeave = () => {
+      setIsPictureInPicture(false);
+    };
+
+    media.addEventListener(
+      "enterpictureinpicture",
+      handleEnter,
+    );
+    media.addEventListener(
+      "leavepictureinpicture",
+      handleLeave,
+    );
+
+    return () => {
+      media.removeEventListener(
+        "enterpictureinpicture",
+        handleEnter,
+      );
+      media.removeEventListener(
+        "leavepictureinpicture",
+        handleLeave,
+      );
+    };
+  }, [src, hlsSrc]);
 
   /*
    * Auto-hide controls.
@@ -1243,8 +1409,79 @@ export function MediaPlayer({
     }, []);
 
   /*
+   * Picture-in-Picture.
+   */
+  const togglePictureInPicture =
+    useCallback(async () => {
+      const media =
+        mediaRef.current;
+
+      if (!media || isAudio) {
+        return;
+      }
+
+      try {
+        if (document.pictureInPictureElement) {
+          await document.exitPictureInPicture();
+          setIsPictureInPicture(false);
+          return;
+        }
+
+        if (
+          typeof media.requestPictureInPicture ===
+          "function"
+        ) {
+          await media.requestPictureInPicture();
+          setIsPictureInPicture(true);
+        }
+      } catch {
+        // Picture-in-Picture may be unavailable or blocked.
+      }
+    }, [isAudio]);
+
+  /*
    * Time updates.
    */
+  const handleSeekPreviewMove =
+    useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+      const track = progressTrackRef.current;
+      const preview = seekPreviewRef.current;
+
+      if (!track || !progressMax) {
+        return;
+      }
+
+      const rect = track.getBoundingClientRect();
+      if (!rect.width) {
+        return;
+      }
+
+      const ratio = Math.max(
+        0,
+        Math.min(
+          1,
+          (event.clientX - rect.left) / rect.width,
+        ),
+      );
+
+      const nextTime = ratio * progressMax;
+      setSeekPreviewTime(nextTime);
+      setShowSeekPreview(true);
+
+      if (preview && preview.readyState >= 1) {
+        try {
+          preview.currentTime = nextTime;
+        } catch {
+          // The preview may still be loading its metadata.
+        }
+      }
+    }, [progressMax]);
+
+  const handleSeekPreviewLeave =
+    useCallback(() => {
+      setShowSeekPreview(false);
+    }, []);
+
   function handleTimeUpdate(
     event: SyntheticEvent<HTMLVideoElement>,
   ) {
@@ -1261,6 +1498,17 @@ export function MediaPlayer({
       Math.floor(
         media.currentTime,
       );
+
+    if (
+      playbackPositionKey &&
+      media.currentTime > 0 &&
+      Math.abs(
+        media.currentTime -
+          lastSavedPositionRef.current,
+      ) >= 5
+    ) {
+      savePlaybackPosition();
+    }
 
     if (
       !onProgress ||
@@ -1315,6 +1563,26 @@ export function MediaPlayer({
       case "ArrowLeft":
         event.preventDefault();
         skip(-10);
+        break;
+
+      case "ArrowUp":
+        event.preventDefault();
+        changeVolume(
+          Math.min(1, media.volume + 0.05),
+        );
+        break;
+
+      case "ArrowDown":
+        event.preventDefault();
+        changeVolume(
+          Math.max(0, media.volume - 0.05),
+        );
+        break;
+
+      case "p":
+      case "P":
+        event.preventDefault();
+        void togglePictureInPicture();
         break;
 
       case "m":
@@ -1411,8 +1679,26 @@ export function MediaPlayer({
           : "aspect-video",
         className,
       )}
+      style={
+        !isAudio
+          ? { aspectRatio: "16 / 9" }
+          : undefined
+      }
     >
       {/* Video */}
+      {!isAudio && (
+        <>
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 top-0 z-10 h-20 bg-gradient-to-b from-black/55 to-transparent opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+          />
+          <div
+            aria-hidden="true"
+            className="pointer-events-none absolute inset-x-0 bottom-0 z-10 h-32 bg-gradient-to-t from-black/80 via-black/25 to-transparent"
+          />
+        </>
+      )}
+
       <video
         ref={mediaRef}
         {...(hlsSrc
@@ -1431,8 +1717,9 @@ export function MediaPlayer({
         preload="auto"
         aria-label={title}
         className={cn(
-          "size-full object-contain bg-black",
+          "absolute inset-0 size-full object-contain bg-black",
           "select-none",
+          "max-h-full max-w-full",
           isAudio &&
             "h-16",
         )}
@@ -1446,16 +1733,45 @@ export function MediaPlayer({
             media.duration,
           );
 
+          let resumeAt =
+            startAt;
+
           if (
-            startAt > 0 &&
-            startAt <
-              media.duration
+            resumeAt <= 0 &&
+            playbackPositionKey
+          ) {
+            try {
+              const stored =
+                Number(
+                  window.localStorage.getItem(
+                    playbackPositionKey,
+                  ),
+                );
+
+              if (
+                Number.isFinite(stored) &&
+                stored > 0
+              ) {
+                resumeAt = stored;
+              }
+            } catch {
+              // Ignore storage failures.
+            }
+          }
+
+          if (
+            resumeAt > 0 &&
+            resumeAt <
+              Math.max(
+                0,
+                media.duration - 1,
+              )
           ) {
             media.currentTime =
-              startAt;
+              resumeAt;
 
             setCurrent(
-              startAt,
+              resumeAt,
             );
           }
 
@@ -1499,6 +1815,8 @@ export function MediaPlayer({
           }
         }}
         onPause={() => {
+          savePlaybackPosition();
+
           setState(
             (previous) =>
               previous ===
@@ -1549,12 +1867,36 @@ export function MediaPlayer({
             "playing",
           );
         }}
+        onLoadedData={() => {
+          const media =
+            mediaRef.current;
+
+          if (
+            media &&
+            !media.paused &&
+            media.readyState >= 2
+          ) {
+            setState("playing");
+          }
+        }}
         onTimeUpdate={
           handleTimeUpdate
         }
         onEnded={() => {
           setState("paused");
           setShowControls(true);
+
+          if (playbackPositionKey) {
+            try {
+              window.localStorage.removeItem(
+                playbackPositionKey,
+              );
+              lastSavedPositionRef.current =
+                0;
+            } catch {
+              // Ignore storage failures.
+            }
+          }
         }}
         onError={() => {
           if (hlsSrc) {
@@ -1736,51 +2078,95 @@ export function MediaPlayer({
             Seek through {title}
           </label>
 
-          <input
-            id={progressId}
-            type="range"
-            min={0}
-            max={progressMax || 1}
-            step={0.1}
-            value={Math.min(
-              current,
-              progressMax || 1,
-            )}
-            disabled={
-              progressMax === 0
-            }
-            onPointerDown={() =>
-              setIsSeeking(true)
-            }
-            onPointerUp={() =>
-              setIsSeeking(false)
-            }
-            onChange={(event) =>
-              seekTo(
-                Number(
-                  event.target.value,
-                ),
-              )
-            }
-            aria-valuetext={`${formatDuration(
-              current,
-            )} of ${formatDuration(
-              progressMax,
-            )}`}
-            className="
-              mb-2
-              h-1.5
-              w-full
-              cursor-pointer
-              appearance-none
-              rounded-full
-              bg-white/20
-              accent-[#8B5CF6]
-              transition-[height]
-              duration-150
-              hover:h-2
-            "
-          />
+          <div
+            ref={progressTrackRef}
+            className="relative mb-2"
+            onPointerMove={handleSeekPreviewMove}
+            onPointerEnter={handleSeekPreviewMove}
+            onPointerLeave={handleSeekPreviewLeave}
+          >
+            {showSeekPreview && src ? (
+              <div
+                className="pointer-events-none absolute bottom-full z-40 mb-3 -translate-x-1/2 overflow-hidden rounded-xl border border-white/15 bg-[#09090d] shadow-[0_16px_45px_rgba(0,0,0,0.55)] ring-1 ring-black/30"
+                style={{
+                  left: `${Math.max(11, Math.min(89, (seekPreviewTime / Math.max(progressMax, 1)) * 100))}%`,
+                }}
+              >
+                <div className="relative h-24 w-40 overflow-hidden bg-black sm:h-28 sm:w-48">
+                  <video
+                    ref={seekPreviewRef}
+                    src={src}
+                    muted
+                    controls={false}
+                    playsInline
+                    preload="metadata"
+                    poster={poster ?? undefined}
+                    disablePictureInPicture
+                    disableRemotePlayback
+                    onLoadedMetadata={(event) => {
+                      try {
+                        event.currentTarget.currentTime = seekPreviewTime;
+                      } catch {
+                        // Metadata may not be seekable immediately.
+                      }
+                    }}
+                    className="pointer-events-none size-full select-none object-cover"
+                    aria-hidden="true"
+                    tabIndex={-1}
+                  />
+                  <div className="absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-black/85 to-transparent" />
+                  <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 rounded-md border border-white/10 bg-black/70 px-2 py-0.5 font-mono text-[10px] font-medium tabular-nums text-white shadow-sm backdrop-blur-sm">
+                    {formatDuration(seekPreviewTime)}
+                  </span>
+                </div>
+              </div>
+            ) : null}
+
+            <input
+              id={progressId}
+              type="range"
+              min={0}
+              max={progressMax || 1}
+              step={0.1}
+              value={Math.min(
+                current,
+                progressMax || 1,
+              )}
+              disabled={
+                progressMax === 0
+              }
+              onPointerDown={() =>
+                setIsSeeking(true)
+              }
+              onPointerUp={() =>
+                setIsSeeking(false)
+              }
+              onChange={(event) =>
+                seekTo(
+                  Number(
+                    event.target.value,
+                  ),
+                )
+              }
+              aria-valuetext={`${formatDuration(
+                current,
+              )} of ${formatDuration(
+                progressMax,
+              )}`}
+              className="
+                h-1.5
+                w-full
+                cursor-pointer
+                appearance-none
+                rounded-full
+                bg-white/20
+                accent-[#8B5CF6]
+                transition-[height]
+                duration-150
+                hover:h-2
+              "
+            />
+          </div>
 
           {/* Control row */}
           <div className="flex min-w-0 items-center gap-1.5">
@@ -2088,6 +2474,48 @@ export function MediaPlayer({
                     ),
                   )}
                 </select>
+              ) : null}
+
+              {/* Picture-in-Picture */}
+              {!isAudio &&
+              typeof document !==
+                "undefined" &&
+              "pictureInPictureEnabled" in
+                document ? (
+                <button
+                  type="button"
+                  onClick={() =>
+                    void togglePictureInPicture()
+                  }
+                  aria-label={
+                    isPictureInPicture
+                      ? "Exit picture in picture"
+                      : "Picture in picture"
+                  }
+                  title={
+                    isPictureInPicture
+                      ? "Exit Picture-in-Picture"
+                      : "Picture-in-Picture"
+                  }
+                  className="
+                    flex
+                    size-9
+                    items-center
+                    justify-center
+                    rounded-lg
+                    text-white/75
+                    transition-all
+                    duration-150
+                    hover:bg-white/10
+                    hover:text-white
+                    active:scale-95
+                  "
+                >
+                  <PictureInPicture
+                    className="size-4"
+                    aria-hidden="true"
+                  />
+                </button>
               ) : null}
 
               {/* Fullscreen */}

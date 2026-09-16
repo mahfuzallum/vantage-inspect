@@ -248,11 +248,21 @@ export async function generatePreview(
 }
 
 /**
- * Package the ORIGINAL video as a single HLS rendition.
+ * Generate a browser-compatible HLS rendition.
  *
- * IMPORTANT: this intentionally uses stream copy. The uploaded video is never
- * resized, re-encoded, or assigned a different bitrate. HLS only splits the
- * existing encoded streams into segments for playback.
+ * IMPORTANT:
+ *
+ * The uploaded video's original codec is NOT copied directly.
+ *
+ * Video is encoded as:
+ * - H.264
+ * - yuv420p
+ *
+ * Audio is encoded as:
+ * - AAC
+ *
+ * This makes the generated HLS stream compatible with
+ * normal browser HTML5/HLS playback.
  */
 export async function generateRendition(
   sourcePath: string,
@@ -265,25 +275,87 @@ export async function generateRendition(
 
   await mkdir(localDir, { recursive: true });
 
+  /*
+   * H.264 requires dimensions compatible with
+   * the selected pixel format.
+   *
+   * Force both dimensions to even values while
+   * preserving the original aspect ratio.
+   */
+  const outputWidth =
+    Math.max(
+      2,
+      Math.floor(source.width / 2) * 2,
+    );
+
+  const outputHeight =
+    Math.max(
+      2,
+      Math.floor(source.height / 2) * 2,
+    );
+
   const args = [
     "-y",
+
     "-i",
     sourcePath,
+
     "-map",
     "0:v:0",
   ];
 
   if (source.hasAudio) {
-    args.push("-map", "0:a:0?");
+    args.push(
+      "-map",
+      "0:a:0?",
+    );
   }
 
+  /*
+   * Browser-compatible video encoding.
+   *
+   * veryfast keeps CPU usage reasonable while
+   * still producing a good quality H.264 stream.
+   */
   args.push(
+    "-vf",
+    `scale=${outputWidth}:${outputHeight}:flags=lanczos`,
+
     "-c:v",
-    "copy",
+    "libx264",
+
+    "-preset",
+    "veryfast",
+
+    "-crf",
+    "23",
+
+    "-pix_fmt",
+    "yuv420p",
+
+    /*
+     * Keep keyframes aligned with HLS segments.
+     * This makes seeking and segment switching
+     * more reliable.
+     */
+    "-force_key_frames",
+    `expr:gte(t,n_forced*${SEGMENT_SECONDS})`,
+
+    "-sc_threshold",
+    "0",
   );
 
   if (source.hasAudio) {
-    args.push("-c:a", "copy");
+    args.push(
+      "-c:a",
+      "aac",
+
+      "-b:a",
+      "128k",
+
+      "-ar",
+      "48000",
+    );
   } else {
     args.push("-an");
   }
@@ -291,33 +363,80 @@ export async function generateRendition(
   args.push(
     "-f",
     "hls",
+
     "-hls_time",
     String(SEGMENT_SECONDS),
+
     "-hls_playlist_type",
     "vod",
+
+    "-hls_flags",
+    "independent_segments",
+
     "-hls_segment_filename",
-    path.join(localDir, "segment-%04d.ts"),
-    path.join(localDir, "playlist.m3u8"),
+    path.join(
+      localDir,
+      "segment-%04d.ts",
+    ),
+
+    path.join(
+      localDir,
+      "playlist.m3u8",
+    ),
   );
 
   await ffmpeg(args);
 
-  const files = await readdir(localDir);
+  const files =
+    await readdir(
+      localDir,
+    );
+
   let sizeBytes = 0;
 
   for (const file of files) {
     sizeBytes += (
-      await stat(path.join(localDir, file))
+      await stat(
+        path.join(
+          localDir,
+          file,
+        ),
+      )
     ).size;
   }
 
+  /*
+   * The actual bitrate is no longer the original
+   * source bitrate because the video was re-encoded.
+   *
+   * Estimate a useful master-playlist bandwidth
+   * from the source bitrate when available.
+   */
+  const bitrateKbps =
+    Math.max(
+      256,
+      Math.round(
+        (source.bitrate ?? 1_000_000) / 1000,
+      ),
+    );
+
   return {
     label,
-    width: source.width,
-    height: source.height,
-    bitrateKbps: Math.max(1, Math.round((source.bitrate ?? 0) / 1000)),
+
+    width: outputWidth,
+
+    height: outputHeight,
+
+    bitrateKbps,
+
     localDir,
-    playlistKey: storagePaths.hlsVariantPlaylist(videoId, label),
+
+    playlistKey:
+      storagePaths.hlsVariantPlaylist(
+        videoId,
+        label,
+      ),
+
     sizeBytes,
   };
 }
@@ -341,7 +460,11 @@ export async function writeMasterPlaylist(
     );
 
   for (const rendition of ordered) {
-    const bandwidth = Math.max(1, rendition.bitrateKbps * 1000);
+    const bandwidth =
+      Math.max(
+        1,
+        rendition.bitrateKbps * 1000,
+      );
 
     lines.push(
       `#EXT-X-STREAM-INF:BANDWIDTH=${bandwidth},RESOLUTION=${rendition.width}x${rendition.height},NAME="${rendition.label}"`,
@@ -428,9 +551,10 @@ export async function processVideo(
     );
 
   /*
-   * 4. Package the original encoded streams as one HLS rendition.
+   * 4. Generate browser-compatible HLS rendition.
    *
-   * No scaling, bitrate targeting, or codec conversion happens here.
+   * The original video is re-encoded to
+   * H.264/AAC for reliable browser playback.
    */
   const renditions: RenditionResult[] = [
     await generateRendition(

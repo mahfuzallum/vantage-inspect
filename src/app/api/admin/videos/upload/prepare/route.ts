@@ -3,10 +3,17 @@ import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
 import { requireApiRole } from "@/lib/auth/guards";
 import { serverEnv } from "@/lib/env";
-import { handleRouteError, ok, rateLimitedResponse } from "@/lib/api/response";
+import {
+  handleRouteError,
+  ok,
+  rateLimitedResponse,
+} from "@/lib/api/response";
 import { ApiError } from "@/lib/api/errors";
 import { clientIdentifier, rateLimit } from "@/lib/security/rate-limit";
-import { maxUploadBytes, validateUpload } from "@/server/video/upload-validation";
+import {
+  maxUploadBytes,
+  validateUpload,
+} from "@/server/video/upload-validation";
 import { getConfiguredMediaProvider } from "@/server/services/storage-service";
 import { storagePaths } from "@/lib/media/paths";
 import { uniqueSlug, slugify } from "@/lib/utils/slug";
@@ -14,16 +21,33 @@ import { uniqueSlug, slugify } from "@/lib/utils/slug";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
-const ALLOWED_EXTENSIONS = new Set(["mp4", "ts", "mov", "webm", "mkv", "m4v"]);
+const ALLOWED_EXTENSIONS = new Set([
+  "mp4",
+  "ts",
+  "mov",
+  "webm",
+  "mkv",
+  "m4v",
+]);
 
 function decodeHead(value: unknown): Buffer {
   if (typeof value !== "string" || !value) {
-    throw new ApiError("BAD_REQUEST", "Video header data was not provided.");
+    throw new ApiError(
+      "BAD_REQUEST",
+      "Video header data was not provided.",
+    );
   }
 
   try {
-    const normalized = value.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const normalized = value
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+
+    const padded = normalized.padEnd(
+      Math.ceil(normalized.length / 4) * 4,
+      "=",
+    );
+
     const head = Buffer.from(padded, "base64");
 
     if (head.length === 0) {
@@ -32,24 +56,44 @@ function decodeHead(value: unknown): Buffer {
 
     return head.subarray(0, 4096);
   } catch {
-    throw new ApiError("BAD_REQUEST", "Video header data is invalid.");
+    throw new ApiError(
+      "BAD_REQUEST",
+      "Video header data is invalid.",
+    );
   }
 }
 
 function parseBody(value: unknown) {
   if (!value || typeof value !== "object") {
-    throw new ApiError("BAD_REQUEST", "Upload data is invalid.");
+    throw new ApiError(
+      "BAD_REQUEST",
+      "Upload data is invalid.",
+    );
   }
 
   const data = value as Record<string, unknown>;
 
-  const filename = String(data.filename ?? "").trim();
-  const mimeType = String(data.mimeType ?? "").trim();
-  const sizeBytes = Number(data.sizeBytes ?? 0);
-  const title = String(data.title ?? "").trim();
+  const filename = String(
+    data.filename ?? "",
+  ).trim();
 
-  const creatorId = String(data.creatorId ?? "") || null;
-  const categoryId = String(data.categoryId ?? "") || null;
+  const mimeType = String(
+    data.mimeType ?? "",
+  ).trim();
+
+  const sizeBytes = Number(
+    data.sizeBytes ?? 0,
+  );
+
+  const title = String(
+    data.title ?? "",
+  ).trim();
+
+  const creatorId =
+    String(data.creatorId ?? "") || null;
+
+  const categoryId =
+    String(data.categoryId ?? "") || null;
 
   const publish = data.publish === true;
 
@@ -59,7 +103,9 @@ function parseBody(value: unknown) {
   const tagIds = Array.isArray(data.tagIds)
     ? data.tagIds
         .map(String)
-        .filter((id) => /^[a-z0-9]{20,32}$/i.test(id))
+        .filter((id) =>
+          /^[a-z0-9]{20,32}$/i.test(id),
+        )
         .slice(0, 20)
     : [];
 
@@ -70,7 +116,10 @@ function parseBody(value: unknown) {
     );
   }
 
-  if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) {
+  if (
+    !Number.isFinite(sizeBytes) ||
+    sizeBytes <= 0
+  ) {
     throw new ApiError(
       "BAD_REQUEST",
       "The uploaded video size is invalid.",
@@ -105,9 +154,14 @@ function parseBody(value: unknown) {
   };
 }
 
-export async function POST(request: NextRequest) {
+export async function POST(
+  request: NextRequest,
+) {
   try {
-    await requireApiRole("ADMIN", "MODERATOR");
+    await requireApiRole(
+      "ADMIN",
+      "MODERATOR",
+    );
 
     const limit = await rateLimit(
       "api",
@@ -115,12 +169,17 @@ export async function POST(request: NextRequest) {
     );
 
     if (!limit.allowed) {
-      return rateLimitedResponse(limit.resetAt);
+      return rateLimitedResponse(
+        limit.resetAt,
+      );
     }
 
-    const body = parseBody(await request.json());
+    const body = parseBody(
+      await request.json(),
+    );
 
-    const provider = await getConfiguredMediaProvider();
+    const provider =
+      await getConfiguredMediaProvider();
 
     if (!provider.createUploadAuthorization) {
       return ok({
@@ -135,7 +194,10 @@ export async function POST(request: NextRequest) {
       head: body.head,
     });
 
-    if (!check.ok || !ALLOWED_EXTENSIONS.has(check.extension)) {
+    if (
+      !check.ok ||
+      !ALLOWED_EXTENSIONS.has(check.extension)
+    ) {
       throw new ApiError(
         "BAD_REQUEST",
         check.ok
@@ -175,59 +237,120 @@ export async function POST(request: NextRequest) {
           ).map((tag) => tag.id)
         : [];
 
-    const content = await db.content.create({
-      data: {
-        slug,
-        title: body.title,
-        summary: body.summary,
-        kind: "VIDEO",
-        status: body.publish
-          ? "PUBLISHED"
-          : "DRAFT",
-        publishedAt: body.publish
-          ? new Date()
-          : null,
-        category: body.categoryId
-          ? {
-              connect: {
-                id: body.categoryId,
-              },
-            }
-          : undefined,
-        creator: body.creatorId
-          ? {
-              connect: {
-                id: body.creatorId,
-              },
-            }
-          : undefined,
-        processingStatus: "UPLOADING",
-        ...(tagIds.length > 0
-          ? {
-              tags: {
-                create: tagIds.map(
-                  (tagId) => ({
-                    tagId,
-                  }),
-                ),
-              },
-            }
-          : {}),
-      },
-      select: {
-        id: true,
-        slug: true,
-        status: true,
-        publishedAt: true,
-      },
-    });
+    const content =
+      await db.content.create({
+        data: {
+          slug,
+          title: body.title,
+          summary: body.summary,
+          kind: "VIDEO",
+
+          status: body.publish
+            ? "PUBLISHED"
+            : "DRAFT",
+
+          publishedAt: body.publish
+            ? new Date()
+            : null,
+
+          category: body.categoryId
+            ? {
+                connect: {
+                  id: body.categoryId,
+                },
+              }
+            : undefined,
+
+          creator: body.creatorId
+            ? {
+                connect: {
+                  id: body.creatorId,
+                },
+              }
+            : undefined,
+
+          processingStatus: "UPLOADING",
+
+          ...(tagIds.length > 0
+            ? {
+                tags: {
+                  create: tagIds.map(
+                    (tagId) => ({
+                      tagId,
+                    }),
+                  ),
+                },
+              }
+            : {}),
+        },
+
+        select: {
+          id: true,
+          slug: true,
+          status: true,
+          publishedAt: true,
+        },
+      });
 
     try {
-      const objectKey = storagePaths.source(
-        content.id,
-        check.extension,
-      );
+      const objectKey =
+        storagePaths.source(
+          content.id,
+          check.extension,
+        );
 
+      /*
+       * Large uploads use multipart authorization
+       * when the configured provider supports it.
+       *
+       * 64 MiB parts keep the number of multipart
+       * parts reasonable while supporting large files.
+       */
+      if (
+        provider.createMultipartUploadAuthorization
+      ) {
+        const authorization =
+          await provider.createMultipartUploadAuthorization(
+            {
+              objectKey,
+              mimeType: check.detectedMime,
+              sizeBytes: body.sizeBytes,
+              partSizeBytes:
+                64 * 1024 * 1024,
+            },
+          );
+
+        if (!authorization) {
+          await db.content.delete({
+            where: {
+              id: content.id,
+            },
+          });
+
+          return ok({
+            mode: "proxy" as const,
+          });
+        }
+
+        return ok(
+          {
+            mode: "direct" as const,
+            uploadType: "multipart" as const,
+            contentId: content.id,
+            slug: content.slug,
+            objectKey,
+            authorization,
+          },
+          {
+            status: 201,
+          },
+        );
+      }
+
+      /*
+       * Fallback for providers that only support
+       * normal presigned PUT uploads.
+       */
       const authorization =
         await provider.createUploadAuthorization({
           objectKey,
@@ -250,6 +373,7 @@ export async function POST(request: NextRequest) {
       return ok(
         {
           mode: "direct" as const,
+          uploadType: "single" as const,
           contentId: content.id,
           slug: content.slug,
           objectKey,

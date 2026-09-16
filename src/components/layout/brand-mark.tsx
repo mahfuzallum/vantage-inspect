@@ -10,56 +10,83 @@ import { Button } from "@/components/ui/button";
 import { routes } from "@/config/routes";
 import { cn } from "@/lib/utils/cn";
 
-/** Taps needed, and how long the run may take before it resets. */
 const TAPS_REQUIRED = 5;
 const TAP_WINDOW_MS = 2000;
 
-/**
- * The site wordmark, with a hidden way into the administration area.
- *
- * Five deliberate taps inside two seconds opens a code prompt. The window
- * matters: without it, five ordinary clicks on the logo spread over a browsing
- * session would eventually open the prompt for a visitor who never asked for
- * it.
- *
- * The link still works — a single click navigates home as it always did, and
- * nothing about the markup hints the shortcut exists. The code is checked on
- * the server, so it is not in the bundle and cannot be read out of it.
- */
 export function BrandMark({ label }: { label: string }) {
   const [taps, setTaps] = useState(0);
   const [open, setOpen] = useState(false);
-  const [state, action, pending] = useActionState(unlockAdminAction, initialAuthState);
+  const [state, action, pending] = useActionState(
+    unlockAdminAction,
+    initialAuthState,
+  );
   const firstTapAt = useRef(0);
+  const resetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) inputRef.current?.focus();
   }, [open]);
 
-  // Escape closes it, the way any transient overlay should.
   useEffect(() => {
     if (!open) return;
+
     function onKey(event: KeyboardEvent) {
       if (event.key === "Escape") setOpen(false);
     }
+
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+
+    return () => {
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
-  function handleClick(event: React.MouseEvent) {
+  useEffect(() => {
+    return () => {
+      if (resetTimer.current) {
+        clearTimeout(resetTimer.current);
+      }
+    };
+  }, []);
+
+  function handleClick(event: React.MouseEvent<HTMLAnchorElement>) {
+    // Always prevent the Link from navigating while we count the taps.
+    // The old implementation only prevented the fifth click, which caused
+    // the page to navigate/re-render before five taps could be registered.
+    event.preventDefault();
+
     const now = Date.now();
-    const withinRun = now - firstTapAt.current < TAP_WINDOW_MS;
+    const withinRun =
+      firstTapAt.current > 0 &&
+      now - firstTapAt.current < TAP_WINDOW_MS;
+
     const next = withinRun ? taps + 1 : 1;
 
-    if (!withinRun) firstTapAt.current = now;
+    if (!withinRun) {
+      firstTapAt.current = now;
+    }
+
     setTaps(next);
 
-    // Only the final tap is swallowed; earlier ones navigate normally, so a
-    // visitor clicking the logo to go home is never blocked.
-    if (next >= TAPS_REQUIRED) {
-      event.preventDefault();
+    if (resetTimer.current) {
+      clearTimeout(resetTimer.current);
+    }
+
+    resetTimer.current = setTimeout(() => {
       setTaps(0);
+      firstTapAt.current = 0;
+    }, TAP_WINDOW_MS);
+
+    if (next >= TAPS_REQUIRED) {
+      setTaps(0);
+      firstTapAt.current = 0;
+
+      if (resetTimer.current) {
+        clearTimeout(resetTimer.current);
+        resetTimer.current = null;
+      }
+
       setOpen(true);
     }
   }
@@ -75,6 +102,7 @@ export function BrandMark({ label }: { label: string }) {
         <span className="font-display text-base font-extrabold uppercase tracking-tight text-white">
           {label}
         </span>
+
         <Star
           className="size-3.5 shrink-0 fill-[var(--color-gold)] text-[var(--color-gold)]"
           aria-hidden="true"
@@ -91,8 +119,13 @@ export function BrandMark({ label }: { label: string }) {
           )}
         >
           <div className="mb-2 flex items-center gap-2">
-            <KeyRound className="size-3.5 text-accent" aria-hidden="true" />
+            <KeyRound
+              className="size-3.5 text-accent"
+              aria-hidden="true"
+            />
+
             <span className="slate flex-1">Access code</span>
+
             <button
               type="button"
               onClick={() => setOpen(false)}
@@ -113,8 +146,16 @@ export function BrandMark({ label }: { label: string }) {
               aria-invalid={state.status === "error"}
               className="h-9 flex-1"
             />
+
             <Button type="submit" size="sm" disabled={pending}>
-              {pending ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : "Go"}
+              {pending ? (
+                <Loader2
+                  className="size-4 animate-spin"
+                  aria-hidden="true"
+                />
+              ) : (
+                "Go"
+              )}
             </Button>
           </form>
 

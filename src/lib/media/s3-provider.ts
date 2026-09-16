@@ -1,5 +1,9 @@
 import "server-only";
+
 import {
+  AbortMultipartUploadCommand,
+  CompleteMultipartUploadCommand,
+  CreateMultipartUploadCommand,
   DeleteObjectsCommand,
   HeadBucketCommand,
   GetObjectCommand,
@@ -7,29 +11,34 @@ import {
   ListObjectsV2Command,
   PutObjectCommand,
   S3Client,
+  UploadPartCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
+
 import { serverEnv } from "@/lib/env";
 import { randomToken } from "@/lib/utils/hash";
 import { isPublicKey, normalizeExtension } from "./paths";
+
 import type {
+  CompletedUploadPart,
   MediaStorageProvider,
+  MultipartUploadAuthorization,
   ObjectMetadata,
   PresignedUpload,
+  PresignedUploadPart,
   SignedUrlOptions,
   StoredObject,
   UploadInput,
 } from "./types";
 
 /**
- * S3-compatible object storage: AWS S3, Cloudflare R2, MinIO, Backblaze B2.
+ * S3-compatible object storage:
+ * AWS S3, Cloudflare R2, MinIO, Backblaze B2, etc.
  *
- * Nothing in this file knows which of those it is talking to — the endpoint
- * and credentials come from the environment, so changing provider is a config
- * change. Credentials are read only here, on the server, and are never
- * serialised into a response.
+ * Credentials are server-side only.
+ * Browser uploads use short-lived presigned URLs.
  */
 export type S3ProviderConfig = {
   endpoint: string;
@@ -41,9 +50,31 @@ export type S3ProviderConfig = {
   forcePathStyle: boolean;
 };
 
+const DEFAULT_MULTIPART_PART_SIZE = 64 * 1024 * 1024;
+const MIN_MULTIPART_PART_SIZE = 5 * 1024 * 1024;
+const MAX_MULTIPART_PARTS = 10_000;
+const MULTIPART_URL_EXPIRY_SECONDS = 3600;
+
+function normalizePartSize(
+  requested: number,
+  fileSize: number,
+): number {
+  const minimum = Math.max(
+    MIN_MULTIPART_PART_SIZE,
+    Math.ceil(fileSize / MAX_MULTIPART_PARTS),
+  );
+
+  return Math.max(
+    requested,
+    minimum,
+  );
+}
+
 export class S3MediaProvider implements MediaStorageProvider {
   readonly id = "S3" as const;
+
   private client: S3Client | null = null;
+
   private readonly config: S3ProviderConfig | null;
 
   constructor(config?: S3ProviderConfig) {
@@ -51,8 +82,12 @@ export class S3MediaProvider implements MediaStorageProvider {
   }
 
   private get s3(): S3Client {
-    if (this.client) return this.client;
+    if (this.client) {
+      return this.client;
+    }
+
     const env = serverEnv();
+
     const config = this.config ?? {
       endpoint: env.STORAGE_ENDPOINT ?? "",
       region: env.STORAGE_REGION,
@@ -65,30 +100,55 @@ export class S3MediaProvider implements MediaStorageProvider {
 
     this.client = new S3Client({
       region: config.region,
-      ...(config.endpoint ? { endpoint: config.endpoint } : {}),
+      ...(config.endpoint
+        ? { endpoint: config.endpoint }
+        : {}),
       forcePathStyle: config.forcePathStyle,
       credentials: {
         accessKeyId: config.accessKey,
         secretAccessKey: config.secretKey,
       },
     });
+
     return this.client;
   }
 
   private get bucket(): string {
-    const bucket = this.config?.bucket ?? serverEnv().STORAGE_BUCKET;
-    if (!bucket) throw new Error("Storage bucket is not configured");
+    const bucket =
+      this.config?.bucket ??
+      serverEnv().STORAGE_BUCKET;
+
+    if (!bucket) {
+      throw new Error(
+        "Storage bucket is not configured",
+      );
+    }
+
     return bucket;
   }
 
-  async upload(input: UploadInput): Promise<StoredObject> {
-    const extension = normalizeExtension(input.filename.split(".").pop() ?? "");
-    // Random key, not the caller's filename.
-    const objectKey = `${input.prefix ?? "misc"}/${randomToken(12)}${extension}`;
-    return this.putBuffer(objectKey, input.body, input.mimeType);
+  async upload(
+    input: UploadInput,
+  ): Promise<StoredObject> {
+    const extension = normalizeExtension(
+      input.filename.split(".").pop() ?? "",
+    );
+
+    const objectKey =
+      `${input.prefix ?? "misc"}/${randomToken(12)}${extension}`;
+
+    return this.putBuffer(
+      objectKey,
+      input.body,
+      input.mimeType,
+    );
   }
 
-  /** Writes a buffer at an exact key. Used by the pipeline for derived assets. */
+  /**
+   * Writes a buffer at an exact key.
+   *
+   * Used for thumbnails, playlists and other derived assets.
+   */
   async putBuffer(
     objectKey: string,
     body: Buffer | Uint8Array,
@@ -116,8 +176,17 @@ export class S3MediaProvider implements MediaStorageProvider {
     };
   }
 
-  /** Streams a file from disk, so a multi-gigabyte source is never buffered. */
-  async putFile(objectKey: string, filePath: string, contentType: string): Promise<StoredObject> {
+  /**
+   * Streams a local file to S3/R2.
+   *
+   * The complete multi-gigabyte file is never loaded
+   * into memory.
+   */
+  async putFile(
+    objectKey: string,
+    filePath: string,
+    contentType: string,
+  ): Promise<StoredObject> {
     const { size } = await stat(filePath);
 
     await this.s3.send(
@@ -143,141 +212,473 @@ export class S3MediaProvider implements MediaStorageProvider {
     };
   }
 
-  async downloadToFile(object: { bucket?: string | null; objectKey: string }, filePath: string): Promise<void> {
-    const response = await this.s3.send(new GetObjectCommand({ Bucket: object.bucket ?? this.bucket, Key: object.objectKey }));
-    if (!response.Body) throw new Error("Storage returned an empty object body.");
-    const { createWriteStream } = await import("node:fs");
-    const { pipeline } = await import("node:stream/promises");
-    await pipeline(response.Body as NodeJS.ReadableStream, createWriteStream(filePath));
+  async downloadToFile(
+    object: {
+      bucket?: string | null;
+      objectKey: string;
+    },
+    filePath: string,
+  ): Promise<void> {
+    const response = await this.s3.send(
+      new GetObjectCommand({
+        Bucket:
+          object.bucket?.trim() || this.bucket,
+        Key: object.objectKey,
+      }),
+    );
+
+    if (!response.Body) {
+      throw new Error(
+        "Storage returned an empty object body.",
+      );
+    }
+
+    const { createWriteStream } =
+      await import("node:fs");
+
+    const { pipeline } =
+      await import("node:stream/promises");
+
+    await pipeline(
+      response.Body as NodeJS.ReadableStream,
+      createWriteStream(filePath),
+    );
   }
 
-  async delete(object: StoredObject): Promise<void> {
-    if (!object.objectKey) return;
-    await this.deletePrefix(object.objectKey);
+  async delete(
+    object: StoredObject,
+  ): Promise<void> {
+    if (!object.objectKey) {
+      return;
+    }
+
+    await this.deletePrefix(
+      object.objectKey,
+    );
   }
 
-  /** Removes every object under a prefix, a page at a time. */
-  async deletePrefix(prefix: string): Promise<void> {
+  /**
+   * Removes every object under a prefix,
+   * one page at a time.
+   */
+  async deletePrefix(
+    prefix: string,
+  ): Promise<void> {
     let token: string | undefined;
 
     do {
-      const listed = await this.s3.send(
-        new ListObjectsV2Command({
-          Bucket: this.bucket,
-          Prefix: prefix,
-          ContinuationToken: token,
-        }),
-      );
+      const listed =
+        await this.s3.send(
+          new ListObjectsV2Command({
+            Bucket: this.bucket,
+            Prefix: prefix,
+            ContinuationToken: token,
+          }),
+        );
 
-      const keys = (listed.Contents ?? [])
-        .map((entry) => entry.Key)
-        .filter((key): key is string => Boolean(key));
+      const keys =
+        (listed.Contents ?? [])
+          .map((entry) => entry.Key)
+          .filter(
+            (key): key is string =>
+              Boolean(key),
+          );
 
       if (keys.length > 0) {
         await this.s3.send(
           new DeleteObjectsCommand({
             Bucket: this.bucket,
-            Delete: { Objects: keys.map((Key) => ({ Key })) },
+            Delete: {
+              Objects: keys.map(
+                (Key) => ({ Key }),
+              ),
+            },
           }),
         );
       }
 
-      token = listed.IsTruncated ? listed.NextContinuationToken : undefined;
+      token =
+        listed.IsTruncated
+          ? listed.NextContinuationToken
+          : undefined;
     } while (token);
   }
 
   /**
-   * Public CDN URL for derived assets; a short-lived signed URL for anything
-   * private. The signature is generated server-side — no credential ever
-   * reaches the browser.
+   * Resolves a browser-accessible URL.
+   *
+   * Public objects use the configured public URL.
+   * Private objects use a short-lived signed GET.
    */
-  async resolveUrl(object: StoredObject, options?: SignedUrlOptions): Promise<string> {
-    if (!object.objectKey) return "";
-    const env = serverEnv();
-    const publicUrl = this.config?.publicUrl ?? env.STORAGE_PUBLIC_URL;
+  async resolveUrl(
+    object: StoredObject,
+    options?: SignedUrlOptions,
+  ): Promise<string> {
+    if (!object.objectKey) {
+      return "";
+    }
 
-    if (isPublicKey(object.objectKey) && publicUrl) {
-      return `${publicUrl.replace(/\/$/, "")}/${object.objectKey}`;
+    const env = serverEnv();
+
+    const publicUrl =
+      this.config?.publicUrl ??
+      env.STORAGE_PUBLIC_URL;
+
+    if (
+      isPublicKey(object.objectKey) &&
+      publicUrl
+    ) {
+      return `${publicUrl.replace(
+        /\/$/,
+        "",
+      )}/${object.objectKey}`;
     }
 
     return getSignedUrl(
       this.s3,
       new GetObjectCommand({
-        Bucket: object.bucket ?? this.bucket,
+        Bucket:
+          object.bucket?.trim() || this.bucket,
         Key: object.objectKey,
-        ...(options?.download ? { ResponseContentDisposition: "attachment" } : {}),
+        ...(options?.download
+          ? {
+              ResponseContentDisposition:
+                "attachment",
+            }
+          : {}),
       }),
-      { expiresIn: options?.expiresInSeconds ?? 900 },
+      {
+        expiresIn:
+          options?.expiresInSeconds ??
+          900,
+      },
     );
   }
 
   async testConnection(): Promise<void> {
-    await this.s3.send(new HeadBucketCommand({ Bucket: this.bucket }));
+    await this.s3.send(
+      new HeadBucketCommand({
+        Bucket: this.bucket,
+      }),
+    );
   }
 
-  async exists(object: StoredObject): Promise<boolean> {
-    return (await this.getMetadata(object)) !== null;
+  async exists(
+    object: StoredObject,
+  ): Promise<boolean> {
+    return (
+      (await this.getMetadata(object)) !==
+      null
+    );
   }
 
-  async getMetadata(object: StoredObject): Promise<ObjectMetadata | null> {
-    if (!object.objectKey) return null;
+  async getMetadata(
+    object: StoredObject,
+  ): Promise<ObjectMetadata | null> {
+    if (!object.objectKey) {
+      return null;
+    }
 
     try {
-      const head = await this.s3.send(
-        new HeadObjectCommand({
-          Bucket: object.bucket ?? this.bucket,
-          Key: object.objectKey,
-        }),
-      );
+      const head =
+        await this.s3.send(
+          new HeadObjectCommand({
+            Bucket:
+              object.bucket?.trim() || this.bucket,
+            Key: object.objectKey,
+          }),
+        );
 
       return {
         objectKey: object.objectKey,
-        sizeBytes: head.ContentLength ?? 0,
-        mimeType: head.ContentType ?? null,
-        lastModified: head.LastModified ?? null,
-        etag: head.ETag ?? null,
+        sizeBytes:
+          head.ContentLength ?? 0,
+        mimeType:
+          head.ContentType ?? null,
+        lastModified:
+          head.LastModified ?? null,
+        etag:
+          head.ETag ?? null,
       };
     } catch {
-      // A missing object is a normal answer here, not an error worth throwing.
       return null;
     }
   }
 
   /**
-   * Issues a short-lived signed PUT so the browser uploads straight to the
-   * bucket. The application never sees the bytes, and no credential leaves the
-   * server — only a signature scoped to one key, one content type and one
-   * expiry.
+   * Normal single PUT authorization.
    *
-   * Content-Type is part of the signature, so a client cannot substitute a
-   * different type after authorization was granted for an image.
+   * Kept for smaller uploads and backwards compatibility.
    */
-  async createUploadAuthorization(params: {
-    objectKey: string;
-    mimeType: string;
-    maxSizeBytes: number;
-  }): Promise<PresignedUpload> {
+  async createUploadAuthorization(
+    params: {
+      objectKey: string;
+      mimeType: string;
+      maxSizeBytes: number;
+    },
+  ): Promise<PresignedUpload> {
     const expiresInSeconds = 600;
 
-    const url = await getSignedUrl(
-      this.s3,
-      new PutObjectCommand({
-        Bucket: this.bucket,
-        Key: params.objectKey,
-        ContentType: params.mimeType,
-        CacheControl: isPublicKey(params.objectKey)
-          ? "public, max-age=31536000, immutable"
-          : "private, no-store",
-      }),
-      { expiresIn: expiresInSeconds },
-    );
+    const url =
+      await getSignedUrl(
+        this.s3,
+        new PutObjectCommand({
+          Bucket: this.bucket,
+          Key: params.objectKey,
+          ContentType: params.mimeType,
+          CacheControl:
+            isPublicKey(
+              params.objectKey,
+            )
+              ? "public, max-age=31536000, immutable"
+              : "private, no-store",
+        }),
+        {
+          expiresIn:
+            expiresInSeconds,
+        },
+      );
 
     return {
       url,
       method: "PUT",
-      headers: { "Content-Type": params.mimeType },
-      objectKey: params.objectKey,
+      headers: {
+        "Content-Type":
+          params.mimeType,
+      },
+      objectKey:
+        params.objectKey,
       expiresInSeconds,
     };
+  }
+
+  /**
+   * Starts a multipart upload and creates a presigned
+   * PUT URL for every part.
+   *
+   * The server never receives the actual video bytes.
+   */
+  async createMultipartUploadAuthorization(
+    params: {
+      objectKey: string;
+      mimeType: string;
+      sizeBytes: number;
+      partSizeBytes: number;
+    },
+  ): Promise<MultipartUploadAuthorization> {
+    if (
+      params.sizeBytes <= 0
+    ) {
+      throw new Error(
+        "Multipart upload size must be positive.",
+      );
+    }
+
+    const partSize =
+      normalizePartSize(
+        params.partSizeBytes ||
+          DEFAULT_MULTIPART_PART_SIZE,
+        params.sizeBytes,
+      );
+
+    const partCount =
+      Math.ceil(
+        params.sizeBytes /
+          partSize,
+      );
+
+    if (
+      partCount >
+      MAX_MULTIPART_PARTS
+    ) {
+      throw new Error(
+        "Multipart upload requires more than 10,000 parts.",
+      );
+    }
+
+    const started =
+      await this.s3.send(
+        new CreateMultipartUploadCommand({
+          Bucket: this.bucket,
+          Key: params.objectKey,
+          ContentType:
+            params.mimeType,
+          CacheControl:
+            isPublicKey(
+              params.objectKey,
+            )
+              ? "public, max-age=31536000, immutable"
+              : "private, no-store",
+        }),
+      );
+
+    if (!started.UploadId) {
+      throw new Error(
+        "Storage did not return a multipart upload ID.",
+      );
+    }
+
+    const parts: PresignedUploadPart[] =
+      [];
+
+    try {
+      for (
+        let partNumber = 1;
+        partNumber <= partCount;
+        partNumber += 1
+      ) {
+        const url =
+          await getSignedUrl(
+            this.s3,
+            new UploadPartCommand({
+              Bucket:
+                this.bucket,
+              Key:
+                params.objectKey,
+              UploadId:
+                started.UploadId,
+              PartNumber:
+                partNumber,
+            }),
+            {
+              expiresIn:
+                MULTIPART_URL_EXPIRY_SECONDS,
+            },
+          );
+
+        parts.push({
+          partNumber,
+          url,
+          method: "PUT",
+          headers: {},
+          expiresInSeconds:
+            MULTIPART_URL_EXPIRY_SECONDS,
+        });
+      }
+    } catch (error) {
+      await this.abortMultipartUpload({
+        objectKey:
+          params.objectKey,
+        uploadId:
+          started.UploadId,
+      }).catch(() => undefined);
+
+      throw error;
+    }
+
+    return {
+      uploadId:
+        started.UploadId,
+      objectKey:
+        params.objectKey,
+      partSizeBytes:
+        partSize,
+      parts,
+      expiresInSeconds:
+        MULTIPART_URL_EXPIRY_SECONDS,
+    };
+  }
+
+  /**
+   * Completes a multipart upload after the browser
+   * has successfully uploaded every part.
+   */
+  async completeMultipartUpload(
+    params: {
+      objectKey: string;
+      uploadId: string;
+      parts: CompletedUploadPart[];
+    },
+  ): Promise<StoredObject | null> {
+    if (
+      !params.parts.length
+    ) {
+      throw new Error(
+        "Multipart upload has no completed parts.",
+      );
+    }
+
+    const sortedParts =
+      [...params.parts].sort(
+        (a, b) =>
+          a.partNumber -
+          b.partNumber,
+      );
+
+    const validParts =
+      sortedParts.every(
+        (part, index) =>
+          part.partNumber ===
+            index + 1 &&
+          Boolean(part.etag),
+      );
+
+    if (!validParts) {
+      throw new Error(
+        "Multipart upload parts are invalid or incomplete.",
+      );
+    }
+
+    const completed =
+      await this.s3.send(
+        new CompleteMultipartUploadCommand({
+          Bucket: this.bucket,
+          Key: params.objectKey,
+          UploadId:
+            params.uploadId,
+          MultipartUpload: {
+            Parts:
+              sortedParts.map(
+                (part) => ({
+                  PartNumber:
+                    part.partNumber,
+                  ETag:
+                    part.etag,
+                }),
+              ),
+          },
+        }),
+      );
+
+    if (
+      !completed.Key
+    ) {
+      return null;
+    }
+
+    return {
+      provider: "S3",
+      bucket: this.bucket,
+      objectKey:
+        completed.Key,
+      url: null,
+      mimeType:
+        completed.ChecksumType
+          ? null
+          : null,
+      sizeBytes: null,
+    };
+  }
+
+  /**
+   * Aborts an incomplete multipart upload.
+   *
+   * This is important so failed uploads do not leave
+   * unfinished parts behind in R2.
+   */
+  async abortMultipartUpload(
+    params: {
+      objectKey: string;
+      uploadId: string;
+    },
+  ): Promise<void> {
+    await this.s3.send(
+      new AbortMultipartUploadCommand({
+        Bucket: this.bucket,
+        Key: params.objectKey,
+        UploadId:
+          params.uploadId,
+      }),
+    );
   }
 }

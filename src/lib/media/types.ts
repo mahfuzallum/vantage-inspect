@@ -58,7 +58,7 @@ export type ObjectMetadata = {
 };
 
 /**
- * Authorization for direct browser -> storage uploads.
+ * Authorization for a normal direct browser -> storage upload.
  */
 export type PresignedUpload = {
   /**
@@ -88,6 +88,40 @@ export type PresignedUpload = {
 };
 
 /**
+ * Authorization for one multipart-upload part.
+ */
+export type PresignedUploadPart = {
+  partNumber: number;
+  url: string;
+  method: "PUT";
+  headers: Record<string, string>;
+  expiresInSeconds: number;
+};
+
+/**
+ * Authorization returned when a large upload should use
+ * an S3-compatible multipart upload.
+ */
+export type MultipartUploadAuthorization = {
+  uploadId: string;
+  objectKey: string;
+  partSizeBytes: number;
+  parts: PresignedUploadPart[];
+  expiresInSeconds: number;
+};
+
+/**
+ * One completed multipart-upload part.
+ *
+ * The browser receives the ETag from the storage response and
+ * sends it back when completing the multipart upload.
+ */
+export type CompletedUploadPart = {
+  partNumber: number;
+  etag: string;
+};
+
+/**
  * Common interface implemented by every media backend.
  *
  * Local disk, S3 and R2 can therefore be swapped through
@@ -111,13 +145,6 @@ export interface MediaStorageProvider {
 
   /**
    * Delete every object whose key starts with the supplied prefix.
-   *
-   * This is required for generated media such as HLS:
-   *
-   * videos/hls/<contentId>/
-   *
-   * which contains the master playlist, variant playlists
-   * and video segments.
    */
   deletePrefix(prefix: string): Promise<void>;
 
@@ -147,14 +174,43 @@ export interface MediaStorageProvider {
   /**
    * Optional direct-to-storage upload authorization.
    *
-   * Local storage does not support this and can return null.
-   * S3/R2 production storage should implement it.
+   * Small files can use a normal signed PUT.
    */
   createUploadAuthorization?(params: {
     objectKey: string;
     mimeType: string;
     maxSizeBytes: number;
   }): Promise<PresignedUpload | null>;
+
+  /**
+   * Optional multipart upload authorization.
+   *
+   * Large files use this instead of sending the complete file
+   * in one PUT request.
+   */
+  createMultipartUploadAuthorization?(params: {
+    objectKey: string;
+    mimeType: string;
+    sizeBytes: number;
+    partSizeBytes: number;
+  }): Promise<MultipartUploadAuthorization | null>;
+
+  /**
+   * Optional completion of a multipart upload.
+   */
+  completeMultipartUpload?(params: {
+    objectKey: string;
+    uploadId: string;
+    parts: CompletedUploadPart[];
+  }): Promise<StoredObject | null>;
+
+  /**
+   * Optional abort of an incomplete multipart upload.
+   */
+  abortMultipartUpload?(params: {
+    objectKey: string;
+    uploadId: string;
+  }): Promise<void>;
 }
 
 /**

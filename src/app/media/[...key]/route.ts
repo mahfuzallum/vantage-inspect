@@ -8,20 +8,23 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { serverEnv } from "@/lib/env";
 import { isPublicKey } from "@/lib/media/paths";
+import { getConfiguredMediaProvider } from "@/server/services/storage-service";
+import type { StoredObject } from "@/lib/media/types";
 
 /**
- * Serves locally stored media files.
+ * Serves public/derived media.
  *
- * Storage root:
- *   MEDIA_LOCAL_ROOT
+ * LOCAL:
+ *   Reads directly from MEDIA_LOCAL_ROOT.
  *
- * Example:
- *   ./storage/uploads
+ * S3 / R2:
+ *   Resolves a storage URL and proxies the object through this route.
  *
  * URL:
  *   /media/videos/thumbnails/<id>/thumbnail.webp
  *   /media/videos/hls/<id>/master.m3u8
- *   /media/videos/original/<id>/source.ts
+ *   /media/videos/hls/<id>/720p/playlist.m3u8
+ *   /media/videos/hls/<id>/720p/segment.ts
  *
  * Original source files remain protected from public access.
  */
@@ -243,6 +246,173 @@ function parseRange(
 }
 
 /**
+ * Proxy public media through the configured S3/R2 provider.
+ *
+ * This is important for private R2 buckets because the browser cannot
+ * directly access the object without a signed URL.
+ */
+async function serveS3Media(
+  request: NextRequest,
+  objectKey: string,
+  method: "GET" | "HEAD",
+): Promise<NextResponse> {
+  const provider =
+    await getConfiguredMediaProvider();
+
+  const env =
+    serverEnv();
+
+  const object: StoredObject = {
+    provider: "S3",
+    bucket:
+      env.STORAGE_BUCKET ?? null,
+    objectKey,
+    url: null,
+    mimeType:
+      getContentType(
+        objectKey,
+      ),
+    sizeBytes: null,
+  };
+
+  const url =
+    await provider.resolveUrl(
+      object,
+      {
+        expiresInSeconds: 900,
+      },
+    );
+
+  if (!url) {
+    return new NextResponse(
+      "Media not found.",
+      {
+        status: 404,
+      },
+    );
+  }
+
+  const rangeHeader =
+    request.headers.get(
+      "range",
+    );
+
+  const upstreamHeaders =
+    new Headers();
+
+  if (rangeHeader) {
+    upstreamHeaders.set(
+      "Range",
+      rangeHeader,
+    );
+  }
+
+  const upstream =
+    await fetch(
+      url,
+      {
+        method,
+        headers:
+          upstreamHeaders,
+        cache: "no-store",
+      },
+    );
+
+  if (
+    !upstream.ok &&
+    upstream.status !== 206
+  ) {
+    if (
+      upstream.status === 404
+    ) {
+      return new NextResponse(
+        "Media not found.",
+        {
+          status: 404,
+        },
+      );
+    }
+
+    return new NextResponse(
+      "Unable to retrieve media.",
+      {
+        status: 502,
+      },
+    );
+  }
+
+  const headers =
+    new Headers();
+
+  const contentType =
+    upstream.headers.get(
+      "content-type",
+    ) ||
+    getContentType(
+      objectKey,
+    );
+
+  headers.set(
+    "Content-Type",
+    contentType,
+  );
+
+  const contentLength =
+    upstream.headers.get(
+      "content-length",
+    );
+
+  if (contentLength) {
+    headers.set(
+      "Content-Length",
+      contentLength,
+    );
+  }
+
+  const contentRange =
+    upstream.headers.get(
+      "content-range",
+    );
+
+  if (contentRange) {
+    headers.set(
+      "Content-Range",
+      contentRange,
+    );
+  }
+
+  headers.set(
+    "Accept-Ranges",
+    "bytes",
+  );
+
+  headers.set(
+    "Cache-Control",
+    "public, max-age=31536000, immutable",
+  );
+
+  if (method === "HEAD") {
+    return new NextResponse(
+      null,
+      {
+        status:
+          upstream.status,
+        headers,
+      },
+    );
+  }
+
+  return new NextResponse(
+    upstream.body,
+    {
+      status:
+        upstream.status,
+      headers,
+    },
+  );
+}
+
+/**
  * GET /media/*
  */
 export async function GET(
@@ -288,6 +458,32 @@ export async function GET(
     const env =
       serverEnv();
 
+    /*
+     * S3 / Cloudflare R2:
+     *
+     * Media lives in object storage, so proxy
+     * the object through a short-lived signed URL.
+     *
+     * This also makes every HLS segment work:
+     *
+     * /media/videos/hls/.../master.m3u8
+     * /media/videos/hls/.../720p/playlist.m3u8
+     * /media/videos/hls/.../720p/segment.ts
+     */
+    if (
+      env.MEDIA_PROVIDER === "s3"
+    ) {
+      return serveS3Media(
+        request,
+        objectKey,
+        "GET",
+      );
+    }
+
+    /*
+     * LOCAL storage:
+     * retain the existing filesystem behaviour.
+     */
     const absolutePath =
       resolveMediaPath(
         env.MEDIA_LOCAL_ROOT,
@@ -525,8 +721,64 @@ export async function HEAD(
   request: NextRequest,
   context: RouteContext,
 ) {
-  return GET(
-    request,
-    context,
-  );
+  try {
+    const { key } =
+      await context.params;
+
+    if (
+      !Array.isArray(key) ||
+      key.length === 0
+    ) {
+      return new NextResponse(
+        "Media key is required.",
+        {
+          status: 400,
+        },
+      );
+    }
+
+    const objectKey =
+      key.join("/");
+
+    if (
+      !isPublicKey(objectKey)
+    ) {
+      return new NextResponse(
+        "Media not found.",
+        {
+          status: 404,
+        },
+      );
+    }
+
+    const env =
+      serverEnv();
+
+    if (
+      env.MEDIA_PROVIDER === "s3"
+    ) {
+      return serveS3Media(
+        request,
+        objectKey,
+        "HEAD",
+      );
+    }
+
+    return GET(
+      request,
+      context,
+    );
+  } catch (error) {
+    console.error(
+      "[media] failed to serve HEAD media:",
+      error,
+    );
+
+    return new NextResponse(
+      "Unable to serve media.",
+      {
+        status: 500,
+      },
+    );
+  }
 }
