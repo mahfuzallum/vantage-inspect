@@ -81,32 +81,70 @@ const SEGMENT_SECONDS = 6;
 /**
  * Picks a useful frame for thumbnail/preview.
  *
- * Avoids the first frame because it is often:
- * - black
- * - a title card
- * - a loading screen
+ * Many webcam recordings contain 1-2 seconds of
+ * black/loading content before the actual video starts.
+ *
+ * We therefore prefer a frame after the startup period.
  */
 export function thumbnailTimestamp(
   durationSeconds: number,
 ): number {
-  if (durationSeconds <= 4) {
+  /*
+   * Extremely short video.
+   */
+  if (durationSeconds <= 1) {
     return Math.max(
       0,
       durationSeconds / 2,
     );
   }
 
+  /*
+   * Short video.
+   *
+   * Use a point closer to the middle/end so we
+   * avoid the initial startup frame.
+   */
+  if (durationSeconds <= 4) {
+    return Math.min(
+      durationSeconds * 0.75,
+      Math.max(
+        0.5,
+        durationSeconds / 2,
+      ),
+    );
+  }
+
+  /*
+   * Normal video.
+   *
+   * Prefer 2.5 seconds because many webcam videos
+   * have 1-2 seconds of startup/blank content.
+   *
+   * Also keep the old 10% behaviour for longer videos.
+   */
   return Math.min(
     60,
     Math.max(
-      1,
+      2.5,
       durationSeconds * 0.1,
     ),
   );
 }
 
 /**
- * Generate a still thumbnail.
+ * Generate a reliable still thumbnail.
+ *
+ * Thumbnail generation tries multiple timestamps.
+ *
+ * This is important for webcam recordings where:
+ *
+ * 0.0s  -> black/loading
+ * 1.0s  -> black/loading
+ * 2.0s  -> video begins
+ *
+ * Instead of relying on one frame, FFmpeg tries
+ * several safe positions automatically.
  */
 export async function generateThumbnail(
   sourcePath: string,
@@ -118,39 +156,152 @@ export async function generateThumbnail(
     "thumbnail.webp",
   );
 
-  const at =
-    thumbnailTimestamp(
-      durationSeconds,
-    );
+  /*
+   * Generate a list of possible timestamps.
+   *
+   * The first positions specifically handle
+   * videos that start 1-2 seconds late.
+   */
+  const candidates = Array.from(
+    new Set(
+      [
+        thumbnailTimestamp(
+          durationSeconds,
+        ),
 
-  await ffmpeg([
-    "-y",
+        1.5,
+        2.5,
+        5,
 
-    "-ss",
-    at.toFixed(2),
+        durationSeconds * 0.25,
+        durationSeconds * 0.5,
+        durationSeconds * 0.75,
+      ]
+        .filter(
+          (value) =>
+            Number.isFinite(value) &&
+            value >= 0 &&
+            value < durationSeconds,
+        )
+        .map(
+          (value) =>
+            Math.max(
+              0,
+              Math.min(
+                value,
+                Math.max(
+                  0,
+                  durationSeconds - 0.1,
+                ),
+              ),
+            ),
+        ),
+    ),
+  );
 
-    "-i",
-    sourcePath,
+  let lastError: unknown = null;
 
-    "-frames:v",
-    "1",
+  for (const at of candidates) {
+    try {
+      /*
+       * Remove the previous output before every attempt.
+       *
+       * This prevents an old thumbnail from being
+       * accidentally accepted when a later FFmpeg
+       * attempt fails.
+       */
+      await rm(
+        output,
+        {
+          force: true,
+        },
+      ).catch(
+        () => undefined,
+      );
 
-    "-vf",
-    "scale='min(1280,iw)':-2:flags=lanczos",
+      /*
+       * Open the input first and seek afterwards.
+       *
+       * This is more reliable for webcam/container
+       * files with unusual timestamps.
+       */
+      await ffmpeg([
+        "-y",
 
-    "-c:v",
-    "libwebp",
+        "-i",
+        sourcePath,
 
-    "-quality",
-    "82",
+        "-ss",
+        at.toFixed(2),
 
-    "-compression_level",
-    "6",
+        "-frames:v",
+        "1",
 
-    output,
-  ]);
+        /*
+         * Keep the original aspect ratio.
+         *
+         * Maximum width is 1280px.
+         */
+        "-vf",
+        "scale='min(1280,iw)':-2:flags=lanczos",
 
-  return output;
+        "-c:v",
+        "libwebp",
+
+        "-quality",
+        "82",
+
+        "-compression_level",
+        "6",
+
+        output,
+      ]);
+
+      /*
+       * FFmpeg can occasionally exit successfully
+       * without producing a usable output.
+       *
+       * Verify that the generated thumbnail actually
+       * exists and contains bytes.
+       */
+      const generated =
+        await stat(
+          output,
+        ).catch(
+          () => null,
+        );
+
+      if (
+        generated &&
+        generated.size > 0
+      ) {
+        console.info(
+          `[processor] thumbnail generated at ${at.toFixed(2)}s`,
+        );
+
+        return output;
+      }
+    } catch (error) {
+      lastError = error;
+
+      console.warn(
+        `[processor] thumbnail attempt failed at ${at.toFixed(2)}s`,
+      );
+    }
+  }
+
+  /*
+   * All thumbnail attempts failed.
+   *
+   * Do not silently continue with a missing thumbnail,
+   * because the worker expects thumbnailPath to exist.
+   */
+  throw new FfmpegError(
+    "Unable to generate a video thumbnail.",
+    lastError instanceof Error
+      ? lastError.message
+      : "No usable video frame was found.",
+  );
 }
 
 /**
@@ -525,6 +676,9 @@ export async function processVideo(
 
   /*
    * 2. Generate thumbnail.
+   *
+   * This automatically tries multiple frames
+   * when the beginning of the video is delayed.
    */
   const thumbnailPath =
     await generateThumbnail(
