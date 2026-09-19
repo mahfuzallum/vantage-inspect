@@ -17,14 +17,21 @@ export type ContentPlayerProps = {
  * The only client boundary on the detail page. Everything else — metadata,
  * description, related rails — stays server-rendered.
  */
-export function ContentPlayer({ contentId, kind, src, hlsSrc, poster, title }: ContentPlayerProps) {
+export function ContentPlayer({
+  contentId,
+  kind,
+  src,
+  hlsSrc,
+  poster,
+  title,
+}: ContentPlayerProps) {
   const trackView = useViewTracker(contentId);
 
   return (
     <MediaPlayer
       kind={kind}
       src={src}
-      hlsSrc={null}
+      hlsSrc={hlsSrc}
       poster={poster}
       title={title}
       onPlaybackStart={trackView}

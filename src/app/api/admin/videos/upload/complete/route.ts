@@ -2,7 +2,6 @@ import type { NextRequest } from "next/server";
 
 import { requireApiRole } from "@/lib/auth/guards";
 import { db } from "@/lib/db";
-import { storagePaths } from "@/lib/media/paths";
 
 import {
   handleRouteError,
@@ -127,25 +126,69 @@ export async function POST(
       );
     }
 
-    const content = await db.content.findUnique({
-      where: { id: contentId },
-      select: { id: true, kind: true },
-    });
+    const content =
+      await db.content.findUnique({
+        where: {
+          id: contentId,
+        },
+        select: {
+          id: true,
+          kind: true,
+        },
+      });
 
-    if (!content || content.kind !== "VIDEO") {
-      return Response.json({ error: { message: "Video content was not found." } }, { status: 400 });
+    if (
+      !content ||
+      content.kind !== "VIDEO"
+    ) {
+      return Response.json(
+        {
+          error: {
+            message:
+              "Video content was not found.",
+          },
+        },
+        {
+          status: 400,
+        },
+      );
     }
 
-    const validPrefix = `videos/original/${content.id}/source.`;
-    if (!objectKey.startsWith(validPrefix)) {
-      return Response.json({ error: { message: "Invalid video storage key." } }, { status: 400 });
+    const validPrefix =
+      `videos/original/${content.id}/source.`;
+
+    if (
+      !objectKey.startsWith(
+        validPrefix,
+      )
+    ) {
+      return Response.json(
+        {
+          error: {
+            message:
+              "Invalid video storage key.",
+          },
+        },
+        {
+          status: 400,
+        },
+      );
     }
 
-    // ETags are optional. S3/R2 will be queried server-side when the browser
-    // cannot expose them because of CORS.
+    /*
+     * ETags are optional. S3/R2 will be queried
+     * server-side when the browser cannot expose
+     * them because of CORS.
+     */
     const parts: CompletePart[] = [];
 
-    for (const part of Array.isArray(body.parts) ? body.parts : []) {
+    for (
+      const part of Array.isArray(
+        body.parts,
+      )
+        ? body.parts
+        : []
+    ) {
       if (
         !part ||
         !Number.isInteger(
@@ -171,13 +214,22 @@ export async function POST(
       parts.push({
         partNumber:
           part.partNumber,
-        etag: part.etag.trim(),
+        etag:
+          part.etag.trim(),
       });
     }
 
-    /* Sort and validate supplied parts. If none were supplied, the provider
-       will obtain the authoritative list from S3/R2. */
-    parts.sort((a, b) => a.partNumber - b.partNumber);
+    /*
+     * Sort and validate supplied parts.
+     * If none were supplied, the provider
+     * will obtain the authoritative list
+     * from S3/R2.
+     */
+    parts.sort(
+      (a, b) =>
+        a.partNumber -
+        b.partNumber,
+    );
 
     for (
       let index = 0;

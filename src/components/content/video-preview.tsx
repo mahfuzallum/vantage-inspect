@@ -1,10 +1,5 @@
 "use client";
 
-import {
-  useEffect,
-  useRef,
-  useState,
-} from "react";
 import { cn } from "@/lib/utils/cn";
 import { placeholderGradient } from "@/lib/media/placeholder";
 
@@ -28,8 +23,15 @@ export function VideoPreview({
 }: VideoPreviewProps) {
   return (
     <div
-      className={cn("absolute inset-0 overflow-hidden bg-[#111118]", className)}
-      style={{ background: poster ? undefined : placeholderGradient(seed) }}
+      className={cn(
+        "absolute inset-0 overflow-hidden bg-[#111118]",
+        className,
+      )}
+      style={{
+        background: poster
+          ? undefined
+          : placeholderGradient(seed),
+      }}
     >
       {poster ? (
         <img
@@ -40,7 +42,11 @@ export function VideoPreview({
           className="absolute inset-0 size-full object-cover"
         />
       ) : null}
-      <div aria-hidden="true" className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/5 to-transparent" />
+
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/70 via-black/5 to-transparent"
+      />
     </div>
   );
 }
