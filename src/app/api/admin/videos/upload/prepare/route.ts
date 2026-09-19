@@ -95,7 +95,8 @@ function parseBody(value: unknown) {
   const categoryId =
     String(data.categoryId ?? "") || null;
 
-  const publish = data.publish === true;
+  const publish =
+    data.publish === true;
 
   const summary =
     String(data.summary ?? "").trim() || null;
@@ -181,13 +182,41 @@ export async function POST(
     const provider =
       await getConfiguredMediaProvider();
 
-    if (provider.id !== "S3") {
-      if (provider.id === "LOCAL" && !provider.createUploadAuthorization) return ok({ mode: "proxy" as const });
-      throw new ApiError("BAD_REQUEST", "Direct video storage is not configured. Configure an S3-compatible storage provider for large video uploads.");
+    /*
+     * LOCAL storage:
+     *
+     * Local uploads must use the normal proxy upload endpoint.
+     * Do not try to create S3 multipart authorization here.
+     */
+    if (provider.id === "LOCAL") {
+      return ok(
+        {
+          mode: "proxy" as const,
+        },
+        {
+          status: 200,
+        },
+      );
     }
 
-    if (!provider.createUploadAuthorization || !provider.createMultipartUploadAuthorization) {
-      throw new ApiError("BAD_REQUEST", "S3 storage does not support direct multipart video uploads.");
+    /*
+     * Only S3-compatible storage supports
+     * browser-side multipart uploads.
+     */
+    if (provider.id !== "S3") {
+      throw new ApiError(
+        "BAD_REQUEST",
+        "Video storage provider is not configured correctly.",
+      );
+    }
+
+    if (
+      !provider.createMultipartUploadAuthorization
+    ) {
+      throw new ApiError(
+        "BAD_REQUEST",
+        "S3 storage does not support direct multipart video uploads.",
+      );
     }
 
     const check = validateUpload({
@@ -199,7 +228,9 @@ export async function POST(
 
     if (
       !check.ok ||
-      !ALLOWED_EXTENSIONS.has(check.extension)
+      !ALLOWED_EXTENSIONS.has(
+        check.extension,
+      )
     ) {
       throw new ApiError(
         "BAD_REQUEST",
@@ -272,7 +303,8 @@ export async function POST(
               }
             : undefined,
 
-          processingStatus: "UPLOADING",
+          processingStatus:
+            "UPLOADING",
 
           ...(tagIds.length > 0
             ? {
@@ -302,48 +334,42 @@ export async function POST(
           check.extension,
         );
 
-      /*
-       * Large uploads use multipart authorization
-       * when the configured provider supports it.
-       *
-       * 64 MiB parts keep the number of multipart
-       * parts reasonable while supporting large files.
-       */
-      {
-        const authorization =
-          await provider.createMultipartUploadAuthorization(
-            {
-              objectKey,
-              mimeType: check.detectedMime,
-              sizeBytes: body.sizeBytes,
-              partSizeBytes:
-                64 * 1024 * 1024,
-            },
-          );
-
-        if (!authorization) {
-          throw new ApiError(
-            "BAD_REQUEST",
-            "The storage provider could not create a multipart upload.",
-          );
-        }
-
-        return ok(
+      const authorization =
+        await provider.createMultipartUploadAuthorization(
           {
-            mode: "direct" as const,
-            uploadType: "multipart" as const,
-            contentId: content.id,
-            slug: content.slug,
             objectKey,
-            authorization,
+            mimeType:
+              check.detectedMime,
+            sizeBytes:
+              body.sizeBytes,
+            partSizeBytes:
+              64 * 1024 * 1024,
           },
-          {
-            status: 201,
-          },
+        );
+
+      if (!authorization) {
+        throw new ApiError(
+          "BAD_REQUEST",
+          "The storage provider could not create a multipart upload.",
         );
       }
 
-      throw new ApiError("BAD_REQUEST", "Multipart upload authorization was not available.");
+      return ok(
+        {
+          mode: "direct" as const,
+          uploadType:
+            "multipart" as const,
+          contentId:
+            content.id,
+          slug:
+            content.slug,
+          objectKey,
+          authorization,
+        },
+        {
+          status: 201,
+        },
+      );
     } catch (error) {
       await db.content
         .delete({

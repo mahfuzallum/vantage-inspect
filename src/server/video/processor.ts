@@ -24,24 +24,25 @@ import { storagePaths } from "@/lib/media/paths";
 /**
  * VideoProcessingService
  *
- * All FFmpeg work for one recording happens here.
+ * IMPORTANT:
  *
- * Pipeline:
+ * The uploaded/original source file is NEVER modified.
  *
- * source video
- *   ↓
- * probe
- *   ↓
- * thumbnail
- *   ↓
- * animated hover preview
- *   ↓
- * HLS renditions
- *   ↓
- * master playlist
+ * FFmpeg works only on a temporary local copy.
  *
- * Everything is generated inside the worker's
- * temporary directory first.
+ * Processing creates:
+ *
+ * 1. thumbnail.webp
+ * 2. optional animated preview.webp
+ * 3. browser-compatible HLS:
+ *      original/
+ *        playlist.m3u8
+ *        segment-0000.ts
+ *        segment-0001.ts
+ *        ...
+ * 4. master.m3u8
+ *
+ * The original uploaded file remains untouched in storage.
  */
 
 export type RenditionResult = {
@@ -53,6 +54,7 @@ export type RenditionResult = {
   /** Local directory containing playlist.m3u8 + segments. */
   localDir: string;
 
+  /** Storage key for the rendition playlist. */
   playlistKey: string;
 
   sizeBytes: number;
@@ -67,31 +69,30 @@ export type ProcessingOutput = {
    * Animated WebP hover preview.
    *
    * Null means preview generation failed.
-   * Preview failure does not fail the whole video.
    */
   previewPath: string | null;
 
+  /**
+   * Local HLS master playlist.
+   *
+   * The original source file is NOT replaced.
+   */
   masterPlaylistPath: string | null;
 
+  /**
+   * Browser-compatible HLS renditions.
+   */
   renditions: RenditionResult[];
 };
 
 const SEGMENT_SECONDS = 6;
 
 /**
- * Picks a useful frame for thumbnail/preview.
- *
- * Many webcam recordings contain 1-2 seconds of
- * black/loading content before the actual video starts.
- *
- * We therefore prefer a frame after the startup period.
+ * Pick a useful frame for thumbnail/preview.
  */
 export function thumbnailTimestamp(
   durationSeconds: number,
 ): number {
-  /*
-   * Extremely short video.
-   */
   if (durationSeconds <= 1) {
     return Math.max(
       0,
@@ -99,12 +100,6 @@ export function thumbnailTimestamp(
     );
   }
 
-  /*
-   * Short video.
-   *
-   * Use a point closer to the middle/end so we
-   * avoid the initial startup frame.
-   */
   if (durationSeconds <= 4) {
     return Math.min(
       durationSeconds * 0.75,
@@ -115,14 +110,6 @@ export function thumbnailTimestamp(
     );
   }
 
-  /*
-   * Normal video.
-   *
-   * Prefer 2.5 seconds because many webcam videos
-   * have 1-2 seconds of startup/blank content.
-   *
-   * Also keep the old 10% behaviour for longer videos.
-   */
   return Math.min(
     60,
     Math.max(
@@ -134,17 +121,6 @@ export function thumbnailTimestamp(
 
 /**
  * Generate a reliable still thumbnail.
- *
- * Thumbnail generation tries multiple timestamps.
- *
- * This is important for webcam recordings where:
- *
- * 0.0s  -> black/loading
- * 1.0s  -> black/loading
- * 2.0s  -> video begins
- *
- * Instead of relying on one frame, FFmpeg tries
- * several safe positions automatically.
  */
 export async function generateThumbnail(
   sourcePath: string,
@@ -156,12 +132,6 @@ export async function generateThumbnail(
     "thumbnail.webp",
   );
 
-  /*
-   * Generate a list of possible timestamps.
-   *
-   * The first positions specifically handle
-   * videos that start 1-2 seconds late.
-   */
   const candidates = Array.from(
     new Set(
       [
@@ -203,13 +173,6 @@ export async function generateThumbnail(
 
   for (const at of candidates) {
     try {
-      /*
-       * Remove the previous output before every attempt.
-       *
-       * This prevents an old thumbnail from being
-       * accidentally accepted when a later FFmpeg
-       * attempt fails.
-       */
       await rm(
         output,
         {
@@ -219,12 +182,6 @@ export async function generateThumbnail(
         () => undefined,
       );
 
-      /*
-       * Open the input first and seek afterwards.
-       *
-       * This is more reliable for webcam/container
-       * files with unusual timestamps.
-       */
       await ffmpeg([
         "-y",
 
@@ -237,11 +194,6 @@ export async function generateThumbnail(
         "-frames:v",
         "1",
 
-        /*
-         * Keep the original aspect ratio.
-         *
-         * Maximum width is 1280px.
-         */
         "-vf",
         "scale='min(1280,iw)':-2:flags=lanczos",
 
@@ -257,13 +209,6 @@ export async function generateThumbnail(
         output,
       ]);
 
-      /*
-       * FFmpeg can occasionally exit successfully
-       * without producing a usable output.
-       *
-       * Verify that the generated thumbnail actually
-       * exists and contains bytes.
-       */
       const generated =
         await stat(
           output,
@@ -290,12 +235,6 @@ export async function generateThumbnail(
     }
   }
 
-  /*
-   * All thumbnail attempts failed.
-   *
-   * Do not silently continue with a missing thumbnail,
-   * because the worker expects thumbnailPath to exist.
-   */
   throw new FfmpegError(
     "Unable to generate a video thumbnail.",
     lastError instanceof Error
@@ -307,14 +246,7 @@ export async function generateThumbnail(
 /**
  * Generate an animated WebP hover preview.
  *
- * This is intentionally small:
- *
- * - 3 seconds
- * - 10 FPS
- * - 480px width
- *
- * It is designed for archive-card hover,
- * not full video playback.
+ * This is optional.
  */
 export async function generatePreview(
   sourcePath: string,
@@ -331,10 +263,6 @@ export async function generatePreview(
       durationSeconds,
     );
 
-  /*
-   * Do not try to generate a 3-second
-   * preview if the video is extremely short.
-   */
   const previewDuration =
     Math.min(
       3,
@@ -357,11 +285,6 @@ export async function generatePreview(
       "-i",
       sourcePath,
 
-      /*
-       * 10 frames/sec is enough for a
-       * smooth hover preview while keeping
-       * the generated WebP relatively small.
-       */
       "-vf",
       "fps=10,scale=480:-2:flags=lanczos",
 
@@ -377,15 +300,22 @@ export async function generatePreview(
       output,
     ]);
 
+    const generated =
+      await stat(
+        output,
+      ).catch(
+        () => null,
+      );
+
+    if (
+      !generated ||
+      generated.size <= 0
+    ) {
+      return null;
+    }
+
     return output;
   } catch (error) {
-    /*
-     * Preview generation is optional.
-     *
-     * If FFmpeg cannot create it, the
-     * actual video must still continue
-     * through the normal processing pipeline.
-     */
     console.warn(
       `[processor] hover preview generation failed: ${
         error instanceof Error
@@ -399,21 +329,21 @@ export async function generatePreview(
 }
 
 /**
- * Generate a browser-compatible HLS rendition.
+ * Generate one browser-compatible HLS rendition.
  *
  * IMPORTANT:
  *
- * The uploaded video's original codec is NOT copied directly.
+ * This does NOT modify the uploaded original file.
  *
- * Video is encoded as:
- * - H.264
- * - yuv420p
+ * The original source is only read by FFmpeg.
  *
- * Audio is encoded as:
- * - AAC
+ * HLS output:
  *
- * This makes the generated HLS stream compatible with
- * normal browser HTML5/HLS playback.
+ * original/
+ *   playlist.m3u8
+ *   segment-0000.ts
+ *   segment-0001.ts
+ *   ...
  */
 export async function generateRendition(
   sourcePath: string,
@@ -422,30 +352,52 @@ export async function generateRendition(
   source: ProbedMedia,
 ): Promise<RenditionResult> {
   const label = "original";
-  const localDir = path.join(workDir, label);
 
-  await mkdir(localDir, { recursive: true });
+  const localDir =
+    path.join(
+      workDir,
+      label,
+    );
+
+  await mkdir(
+    localDir,
+    {
+      recursive: true,
+    },
+  );
 
   /*
-   * H.264 requires dimensions compatible with
-   * the selected pixel format.
-   *
-   * Force both dimensions to even values while
-   * preserving the original aspect ratio.
+   * Keep dimensions even for yuv420p.
    */
   const outputWidth =
     Math.max(
       2,
-      Math.floor(source.width / 2) * 2,
+      Math.floor(
+        source.width / 2,
+      ) * 2,
     );
 
   const outputHeight =
     Math.max(
       2,
-      Math.floor(source.height / 2) * 2,
+      Math.floor(
+        source.height / 2,
+      ) * 2,
     );
 
-  const args = [
+  const playlistPath =
+    path.join(
+      localDir,
+      "playlist.m3u8",
+    );
+
+  const segmentPattern =
+    path.join(
+      localDir,
+      "segment-%04d.ts",
+    );
+
+  const args: string[] = [
     "-y",
 
     "-i",
@@ -455,6 +407,9 @@ export async function generateRendition(
     "0:v:0",
   ];
 
+  /*
+   * Map audio only when it exists.
+   */
   if (source.hasAudio) {
     args.push(
       "-map",
@@ -463,10 +418,7 @@ export async function generateRendition(
   }
 
   /*
-   * Browser-compatible video encoding.
-   *
-   * veryfast keeps CPU usage reasonable while
-   * still producing a good quality H.264 stream.
+   * Browser-compatible H.264.
    */
   args.push(
     "-vf",
@@ -485,9 +437,7 @@ export async function generateRendition(
     "yuv420p",
 
     /*
-     * Keep keyframes aligned with HLS segments.
-     * This makes seeking and segment switching
-     * more reliable.
+     * Reliable HLS keyframe boundaries.
      */
     "-force_key_frames",
     `expr:gte(t,n_forced*${SEGMENT_SECONDS})`,
@@ -496,6 +446,9 @@ export async function generateRendition(
     "0",
   );
 
+  /*
+   * Browser-compatible AAC audio.
+   */
   if (source.hasAudio) {
     args.push(
       "-c:a",
@@ -508,15 +461,22 @@ export async function generateRendition(
       "48000",
     );
   } else {
-    args.push("-an");
+    args.push(
+      "-an",
+    );
   }
 
+  /*
+   * HLS output.
+   */
   args.push(
     "-f",
     "hls",
 
     "-hls_time",
-    String(SEGMENT_SECONDS),
+    String(
+      SEGMENT_SECONDS,
+    ),
 
     "-hls_playlist_type",
     "vod",
@@ -525,19 +485,40 @@ export async function generateRendition(
     "independent_segments",
 
     "-hls_segment_filename",
-    path.join(
-      localDir,
-      "segment-%04d.ts",
-    ),
+    segmentPattern,
 
-    path.join(
-      localDir,
-      "playlist.m3u8",
-    ),
+    playlistPath,
+  );
+
+  console.info(
+    `[processor] generating HLS content=${videoId} source=${path.basename(sourcePath)}`,
   );
 
   await ffmpeg(args);
 
+  /*
+   * Verify playlist exists.
+   */
+  const playlistStat =
+    await stat(
+      playlistPath,
+    ).catch(
+      () => null,
+    );
+
+  if (
+    !playlistStat ||
+    playlistStat.size <= 0
+  ) {
+    throw new FfmpegError(
+      "FFmpeg did not create a valid HLS playlist.",
+      playlistPath,
+    );
+  }
+
+  /*
+   * Calculate generated HLS size.
+   */
   const files =
     await readdir(
       localDir,
@@ -545,38 +526,52 @@ export async function generateRendition(
 
   let sizeBytes = 0;
 
-  for (const file of files) {
-    sizeBytes += (
+  for (
+    const file of files
+  ) {
+    const filePath =
+      path.join(
+        localDir,
+        file,
+      );
+
+    const fileStat =
       await stat(
-        path.join(
-          localDir,
-          file,
-        ),
-      )
-    ).size;
+        filePath,
+      ).catch(
+        () => null,
+      );
+
+    if (
+      fileStat?.isFile()
+    ) {
+      sizeBytes +=
+        fileStat.size;
+    }
   }
 
   /*
-   * The actual bitrate is no longer the original
-   * source bitrate because the video was re-encoded.
-   *
-   * Estimate a useful master-playlist bandwidth
-   * from the source bitrate when available.
+   * Estimate bandwidth.
    */
   const bitrateKbps =
     Math.max(
       256,
       Math.round(
-        (source.bitrate ?? 1_000_000) / 1000,
+        (
+          source.bitrate ??
+          1_000_000
+        ) / 1000,
       ),
     );
 
   return {
     label,
 
-    width: outputWidth,
+    width:
+      outputWidth,
 
-    height: outputHeight,
+    height:
+      outputHeight,
 
     bitrateKbps,
 
@@ -594,11 +589,25 @@ export async function generateRendition(
 
 /**
  * Write the HLS master playlist.
+ *
+ * Because there is currently one rendition,
+ * the master playlist points to:
+ *
+ * original/playlist.m3u8
  */
 export async function writeMasterPlaylist(
   workDir: string,
   renditions: RenditionResult[],
 ): Promise<string> {
+  if (
+    renditions.length === 0
+  ) {
+    throw new FfmpegError(
+      "Cannot create an HLS master playlist without renditions.",
+      "No HLS renditions were generated.",
+    );
+  }
+
   const lines = [
     "#EXTM3U",
     "#EXT-X-VERSION:3",
@@ -610,11 +619,14 @@ export async function writeMasterPlaylist(
         a.height - b.height,
     );
 
-  for (const rendition of ordered) {
+  for (
+    const rendition of ordered
+  ) {
     const bandwidth =
       Math.max(
         1,
-        rendition.bitrateKbps * 1000,
+        rendition.bitrateKbps *
+          1000,
       );
 
     lines.push(
@@ -641,20 +653,137 @@ export async function writeMasterPlaylist(
 
 /**
  * Full processing pipeline.
+ *
+ * IMPORTANT:
+ *
+ * The original uploaded file is NEVER replaced.
+ *
+ * We:
+ *
+ * 1. Probe original
+ * 2. Validate original
+ * 3. Generate thumbnail
+ * 4. Generate optional preview
+ * 5. Generate HLS from original
+ * 6. Generate master playlist
+ *
+ * All generated files live in workDir.
  */
 export async function processVideo(
   sourcePath: string,
   workDir: string,
-  _videoId: string,
+  videoId: string,
 ): Promise<ProcessingOutput> {
-  await mkdir(workDir, { recursive: true });
-  const media = await probe(sourcePath);
-  const validation = validateProbed(media);
-  if (!validation.ok) throw new FfmpegError(validation.reason, validation.reason);
+  await mkdir(
+    workDir,
+    {
+      recursive: true,
+    },
+  );
 
-  // Original-file playback: processing creates only a lightweight thumbnail.
-  const thumbnailPath = await generateThumbnail(sourcePath, workDir, media.durationSeconds);
-  return { media, thumbnailPath, previewPath: null, masterPlaylistPath: null, renditions: [] };
+  /*
+   * Probe original source.
+   */
+  const media =
+    await probe(
+      sourcePath,
+    );
+
+  const validation =
+    validateProbed(
+      media,
+    );
+
+  if (
+    !validation.ok
+  ) {
+    throw new FfmpegError(
+      validation.reason,
+      validation.reason,
+    );
+  }
+
+  /*
+   * Generate thumbnail.
+   */
+  const thumbnailPath =
+    await generateThumbnail(
+      sourcePath,
+      workDir,
+      media.durationSeconds,
+    );
+
+  /*
+   * Preview is optional.
+   */
+  const previewPath =
+    await generatePreview(
+      sourcePath,
+      workDir,
+      media.durationSeconds,
+    );
+
+  /*
+   * Generate browser-compatible HLS.
+   *
+   * This is the important part that was missing
+   * from the previous processVideo().
+   */
+  const rendition =
+    await generateRendition(
+      sourcePath,
+      workDir,
+      videoId,
+      media,
+    );
+
+  const renditions =
+    [rendition];
+
+  /*
+   * Create master playlist.
+   */
+  const masterPlaylistPath =
+    await writeMasterPlaylist(
+      workDir,
+      renditions,
+    );
+
+  /*
+   * Verify master playlist.
+   */
+  const masterStat =
+    await stat(
+      masterPlaylistPath,
+    ).catch(
+      () => null,
+    );
+
+  if (
+    !masterStat ||
+    masterStat.size <= 0
+  ) {
+    throw new FfmpegError(
+      "HLS master playlist was not created.",
+      masterPlaylistPath,
+    );
+  }
+
+  console.info(
+    `[processor] processing complete video=${videoId} hls=true thumbnail=true original-preserved=true`,
+  );
+
+  return {
+    media,
+
+    thumbnailPath,
+
+    previewPath,
+
+    masterPlaylistPath,
+
+    renditions,
+  };
 }
 
 /**
