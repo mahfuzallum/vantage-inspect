@@ -24,7 +24,7 @@ export function ContentPlayer({ contentId, kind, src, hlsSrc, poster, title }: C
     <MediaPlayer
       kind={kind}
       src={src}
-      hlsSrc={hlsSrc}
+      hlsSrc={null}
       poster={poster}
       title={title}
       onPlaybackStart={trackView}

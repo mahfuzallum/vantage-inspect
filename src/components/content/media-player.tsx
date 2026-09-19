@@ -1714,7 +1714,7 @@ export function MediaPlayer({
         }
         autoPlay={autoplay}
         playsInline
-        preload="auto"
+        preload="metadata"
         aria-label={title}
         className={cn(
           "absolute inset-0 size-full object-contain bg-black",

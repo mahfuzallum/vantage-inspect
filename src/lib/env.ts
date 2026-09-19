@@ -42,7 +42,7 @@ const serverSchema = z.object({
   AWS_ACCESS_KEY_ID: z.string().optional(),
   AWS_SECRET_ACCESS_KEY: z.string().optional(),
 
-  MAX_VIDEO_UPLOAD_MB: z.coerce.number().int().positive().default(2048),
+  MAX_VIDEO_UPLOAD_MB: z.coerce.number().int().positive().default(10240),
   VIDEO_WORK_DIR: z.string().default("./.tmp/video"),
   FFMPEG_PATH: z.string().default("ffmpeg"),
   FFPROBE_PATH: z.string().default("ffprobe"),

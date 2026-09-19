@@ -1,6 +1,8 @@
 import type { NextRequest } from "next/server";
 
 import { requireApiRole } from "@/lib/auth/guards";
+import { db } from "@/lib/db";
+import { storagePaths } from "@/lib/media/paths";
 
 import {
   handleRouteError,
@@ -125,30 +127,25 @@ export async function POST(
       );
     }
 
-    /*
-     * Validate parts.
-     */
-    if (
-      !Array.isArray(body.parts) ||
-      body.parts.length === 0
-    ) {
-      return Response.json(
-        {
-          error: {
-            message:
-              "No uploaded multipart parts were provided.",
-          },
-        },
-        {
-          status: 400,
-        },
-      );
+    const content = await db.content.findUnique({
+      where: { id: contentId },
+      select: { id: true, kind: true },
+    });
+
+    if (!content || content.kind !== "VIDEO") {
+      return Response.json({ error: { message: "Video content was not found." } }, { status: 400 });
     }
 
-    const parts: CompletePart[] =
-      [];
+    const validPrefix = `videos/original/${content.id}/source.`;
+    if (!objectKey.startsWith(validPrefix)) {
+      return Response.json({ error: { message: "Invalid video storage key." } }, { status: 400 });
+    }
 
-    for (const part of body.parts) {
+    // ETags are optional. S3/R2 will be queried server-side when the browser
+    // cannot expose them because of CORS.
+    const parts: CompletePart[] = [];
+
+    for (const part of Array.isArray(body.parts) ? body.parts : []) {
       if (
         !part ||
         !Number.isInteger(
@@ -178,19 +175,10 @@ export async function POST(
       });
     }
 
-    /*
-     * Sort parts by part number.
-     */
-    parts.sort(
-      (a, b) =>
-        a.partNumber -
-        b.partNumber,
-    );
+    /* Sort and validate supplied parts. If none were supplied, the provider
+       will obtain the authoritative list from S3/R2. */
+    parts.sort((a, b) => a.partNumber - b.partNumber);
 
-    /*
-     * Parts must be consecutive:
-     * 1, 2, 3, 4...
-     */
     for (
       let index = 0;
       index < parts.length;

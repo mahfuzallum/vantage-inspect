@@ -7,7 +7,7 @@ import { SectionBoundary } from "@/components/layout/section-boundary";
 import { ContentListing } from "@/components/content/content-listing";
 import { ContentGridSkeleton } from "@/components/ui/skeleton";
 import { HomeSidebar } from "@/components/home/home-sidebar";
-import { getHomeData, getSidebarCreators } from "@/server/services/home-service";
+import { getHomeData, getHomeQuickLinks, getSidebarCreators } from "@/server/services/home-service";
 import { safeQuery } from "@/lib/db";
 import { buildMetadata } from "@/lib/seo/metadata";
 import { routes } from "@/config/routes";
@@ -97,7 +97,9 @@ export default async function HomePage({
 }
 
 /** Compact header: name, one line, and the search field. */
-function Masthead() {
+async function Masthead() {
+  const quickLinks = await getHomeQuickLinks();
+
   return (
     <section className="relative overflow-hidden border-b border-white/[0.07]">
       <div
@@ -112,6 +114,20 @@ function Masthead() {
         <div className="mx-auto mt-5 max-w-2xl rounded-xl border border-white/[0.08] bg-white/[0.035] p-1.5 shadow-[0_16px_50px_rgba(0,0,0,0.3)] backdrop-blur">
           <SearchBar size="large" className="w-full" placeholder="Find as you type..." />
         </div>
+
+        {quickLinks.length > 0 ? (
+          <nav aria-label="Quick browse" className="mt-4 flex flex-wrap items-center justify-center gap-2">
+            {quickLinks.map((link) => (
+              <a
+                key={`${link.label}:${link.href}`}
+                href={link.href}
+                className="rounded-full border border-white/[0.08] bg-white/[0.025] px-3.5 py-1.5 text-xs text-white/55 transition hover:border-[#8B5CF6]/50 hover:bg-[#8B5CF6]/10 hover:text-[#C4B5FD]"
+              >
+                #{link.label}
+              </a>
+            ))}
+          </nav>
+        ) : null}
       </Container>
     </section>
   );

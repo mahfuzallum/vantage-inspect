@@ -52,7 +52,7 @@ export const HOME_DEFAULTS = {
     "Explore an organized collection of videos from creators, streamers, webcams and platforms across the web, all in one searchable archive.",
 
   quickLinks:
-    "Webcam, OnlyFans, Couples, Popular, New Releases",
+    "OnlyFans, Webcam, Stripchat, Couples, Popular, New Releases",
 
   featuredOrder: [] as string[],
 };

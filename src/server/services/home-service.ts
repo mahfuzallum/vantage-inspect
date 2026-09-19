@@ -9,6 +9,8 @@ import { getSettings, HOME_DEFAULTS } from "./settings-service";
 import { queryMockContent, queryMockCreators } from "@/lib/mock/query";
 import { mockCategories } from "@/lib/mock/catalogue";
 import { DEFAULT_SORT } from "@/config/filters";
+import { routes } from "@/config/routes";
+import { slugify } from "@/lib/utils/slug";
 import type { CategorySummary, ContentCardModel, CreatorSummary } from "@/types/content";
 import type { DiscoveryFilters } from "@/types/discovery";
 
@@ -89,6 +91,46 @@ function toCopy(settings: Record<string, unknown>): HomeCopy {
     heroDescription: String(settings.heroDescription ?? HOME_DEFAULTS.heroDescription),
     quickLinks,
   };
+}
+
+export type HomeQuickLink = {
+  label: string;
+  href: string;
+};
+
+/**
+ * Resolves the administrator's homepage shortcuts against real taxonomy.
+ * Known system links keep their dedicated pages; a matching tag uses the
+ * public tag route; otherwise the label safely falls back to site search.
+ */
+export async function getHomeQuickLinks(): Promise<HomeQuickLink[]> {
+  const settings = await safeQuery(
+    () => getSettings("home"),
+    {} as Record<string, unknown>,
+  );
+  const labels = toCopy(settings).quickLinks;
+  if (labels.length === 0) return [];
+
+  const slugs = labels.map(slugify).filter(Boolean);
+  const tags = await safeQuery(
+    () => db.tag.findMany({ where: { slug: { in: slugs } }, select: { slug: true } }),
+    [],
+  );
+  const tagSlugs = new Set(tags.map((tag) => tag.slug));
+
+  return labels.map((label) => {
+    const normalized = label.trim().toLowerCase();
+    if (normalized === "popular") return { label, href: routes.popular };
+    if (normalized === "new releases" || normalized === "latest") {
+      return { label, href: routes.latest };
+    }
+
+    const slug = slugify(label);
+    return {
+      label,
+      href: tagSlugs.has(slug) ? routes.tag(slug) : routes.search(label),
+    };
+  });
 }
 
 /**

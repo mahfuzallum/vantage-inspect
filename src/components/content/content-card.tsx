@@ -274,6 +274,17 @@ function isValidSmartLinkUrl(
 /**
  * Fetch the current monetization settings.
  */
+let smartLinkSettingsPromise: Promise<SmartLinkSettings> | null = null;
+let smartLinkSettingsExpiresAt = 0;
+
+function getSharedSmartLinkSettings(): Promise<SmartLinkSettings> {
+  const now = Date.now();
+  if (smartLinkSettingsPromise && now < smartLinkSettingsExpiresAt) return smartLinkSettingsPromise;
+  smartLinkSettingsExpiresAt = now + 30_000;
+  smartLinkSettingsPromise = fetchSmartLinkSettings();
+  return smartLinkSettingsPromise;
+}
+
 async function fetchSmartLinkSettings(): Promise<SmartLinkSettings> {
   try {
     const response =
@@ -375,7 +386,7 @@ export function ContentCard({
   useEffect(() => {
     let active = true;
 
-    fetchSmartLinkSettings().then(
+    getSharedSmartLinkSettings().then(
       (settings) => {
         if (active) {
           setSmartLinkSettings(

@@ -181,10 +181,13 @@ export async function POST(
     const provider =
       await getConfiguredMediaProvider();
 
-    if (!provider.createUploadAuthorization) {
-      return ok({
-        mode: "proxy" as const,
-      });
+    if (provider.id !== "S3") {
+      if (provider.id === "LOCAL" && !provider.createUploadAuthorization) return ok({ mode: "proxy" as const });
+      throw new ApiError("BAD_REQUEST", "Direct video storage is not configured. Configure an S3-compatible storage provider for large video uploads.");
+    }
+
+    if (!provider.createUploadAuthorization || !provider.createMultipartUploadAuthorization) {
+      throw new ApiError("BAD_REQUEST", "S3 storage does not support direct multipart video uploads.");
     }
 
     const check = validateUpload({
@@ -306,9 +309,7 @@ export async function POST(
        * 64 MiB parts keep the number of multipart
        * parts reasonable while supporting large files.
        */
-      if (
-        provider.createMultipartUploadAuthorization
-      ) {
+      {
         const authorization =
           await provider.createMultipartUploadAuthorization(
             {
@@ -321,15 +322,10 @@ export async function POST(
           );
 
         if (!authorization) {
-          await db.content.delete({
-            where: {
-              id: content.id,
-            },
-          });
-
-          return ok({
-            mode: "proxy" as const,
-          });
+          throw new ApiError(
+            "BAD_REQUEST",
+            "The storage provider could not create a multipart upload.",
+          );
         }
 
         return ok(
@@ -347,42 +343,7 @@ export async function POST(
         );
       }
 
-      /*
-       * Fallback for providers that only support
-       * normal presigned PUT uploads.
-       */
-      const authorization =
-        await provider.createUploadAuthorization({
-          objectKey,
-          mimeType: check.detectedMime,
-          maxSizeBytes: maxUploadBytes(),
-        });
-
-      if (!authorization) {
-        await db.content.delete({
-          where: {
-            id: content.id,
-          },
-        });
-
-        return ok({
-          mode: "proxy" as const,
-        });
-      }
-
-      return ok(
-        {
-          mode: "direct" as const,
-          uploadType: "single" as const,
-          contentId: content.id,
-          slug: content.slug,
-          objectKey,
-          authorization,
-        },
-        {
-          status: 201,
-        },
-      );
+      throw new ApiError("BAD_REQUEST", "Multipart upload authorization was not available.");
     } catch (error) {
       await db.content
         .delete({

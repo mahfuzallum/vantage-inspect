@@ -9,6 +9,7 @@ import {
   GetObjectCommand,
   HeadObjectCommand,
   ListObjectsV2Command,
+  ListPartsCommand,
   PutObjectCommand,
   S3Client,
   UploadPartCommand,
@@ -590,16 +591,29 @@ export class S3MediaProvider implements MediaStorageProvider {
       parts: CompletedUploadPart[];
     },
   ): Promise<StoredObject | null> {
-    if (
-      !params.parts.length
-    ) {
-      throw new Error(
-        "Multipart upload has no completed parts.",
+    let suppliedParts = [...params.parts];
+
+    // If the browser cannot expose ETag because of storage CORS, recover the
+    // authoritative uploaded-part list from S3/R2 server-side.
+    if (suppliedParts.length === 0) {
+      const listed = await this.s3.send(
+        new ListPartsCommand({
+          Bucket: this.bucket,
+          Key: params.objectKey,
+          UploadId: params.uploadId,
+        }),
       );
+      suppliedParts = (listed.Parts ?? [])
+        .filter((part) => Number.isInteger(part.PartNumber) && Boolean(part.ETag))
+        .map((part) => ({ partNumber: part.PartNumber as number, etag: part.ETag as string }));
+    }
+
+    if (!suppliedParts.length) {
+      throw new Error("Multipart upload has no completed parts.");
     }
 
     const sortedParts =
-      [...params.parts].sort(
+      [...suppliedParts].sort(
         (a, b) =>
           a.partNumber -
           b.partNumber,

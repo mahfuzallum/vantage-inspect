@@ -106,10 +106,10 @@ export function HomeSettingsForm({ values }: { values: HomeSettingsValues }) {
         </div>
 
         <TextField
-          label="Shortcut tags"
+          label="Homepage tags"
           name="quickLinks"
           defaultValue={values.quickLinks}
-          hint="Comma-separated. Each becomes a #tag under the search box and links to that search."
+          hint="Comma-separated. Example: OnlyFans, Webcam, Stripchat. Existing tags link to their tag pages; Popular and New Releases keep their dedicated pages."
           errors={state.fieldErrors?.quickLinks}
         />
       </FormSection>

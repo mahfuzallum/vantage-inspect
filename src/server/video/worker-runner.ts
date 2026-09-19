@@ -1,11 +1,6 @@
 import "server-only";
 
-import {
-  mkdir,
-  readdir,
-  readFile,
-  stat,
-} from "node:fs/promises";
+import { copyFile, mkdir, stat } from "node:fs/promises";
 
 import path from "node:path";
 
@@ -35,23 +30,12 @@ import type { StoredObject } from "@/lib/media/types";
  *
  * 1. Read original source
  * 2. Generate thumbnail
- * 3. Generate animated hover preview
- * 4. Package original video as HLS (no re-encoding)
- * 5. Upload all assets
- * 6. Mark content READY
+ * 3. Upload thumbnail
+ * 4. Mark content READY
  *
  * A recording is never marked READY before
  * all required media assets are available.
  */
-
-const SEGMENT_CONTENT_TYPE =
-  "video/mp2t";
-
-const PLAYLIST_CONTENT_TYPE =
-  "application/vnd.apple.mpegurl";
-
-const PREVIEW_CONTENT_TYPE =
-  "image/webp";
 
 const THUMBNAIL_CONTENT_TYPE =
   "image/webp";
@@ -113,53 +97,6 @@ async function uploader(): Promise<Uploader> {
  *
  * Segments are uploaded before the playlist.
  */
-async function uploadRendition(
-  store: Uploader,
-  videoId: string,
-  label: string,
-  localDir: string,
-): Promise<void> {
-  const files =
-    await readdir(localDir);
-
-  /*
-   * Upload media segments first.
-   */
-  for (
-    const file of files.filter(
-      (name) =>
-        name.endsWith(".ts"),
-    )
-  ) {
-    await store.putFile(
-      `${storagePaths.hlsVariantDir(
-        videoId,
-        label,
-      )}/${file}`,
-      path.join(
-        localDir,
-        file,
-      ),
-      SEGMENT_CONTENT_TYPE,
-    );
-  }
-
-  /*
-   * Playlist goes after all segments.
-   */
-  await store.putFile(
-    storagePaths.hlsVariantPlaylist(
-      videoId,
-      label,
-    ),
-    path.join(
-      localDir,
-      "playlist.m3u8",
-    ),
-    PLAYLIST_CONTENT_TYPE,
-  );
-}
-
 export type JobOutcome =
   | "succeeded"
   | "retrying"
@@ -257,7 +194,9 @@ export async function runOneJob(
      * Resolve the source from its original storage backend. S3-compatible
      * sources are downloaded to the local FFmpeg scratch area first.
      */
-    const localSource = path.join(env.MEDIA_LOCAL_ROOT, sourceKey);
+    await mkdir(workDir, { recursive: true });
+    const extension = path.extname(sourceKey) || ".bin";
+    const localSource = path.join(workDir, `source${extension}`);
     if (content?.source?.provider === "S3") {
       const sourceProvider = await getMediaProviderForAsset(content.source);
       const downloadToFile = (sourceProvider as unknown as S3DownloadCapable).downloadToFile;
@@ -267,23 +206,15 @@ export async function runOneJob(
       await mkdir(path.dirname(localSource), { recursive: true });
       await downloadToFile.call(sourceProvider, { bucket: content.source.bucket, objectKey: sourceKey }, localSource);
     } else {
-      await stat(localSource).catch(() => {
+      const localStoredSource = path.join(env.MEDIA_LOCAL_ROOT, sourceKey);
+      await stat(localStoredSource).catch(() => {
         throw new FfmpegError(
           "The source file could not be found in storage.",
           sourceKey,
         );
       });
+      await copyFile(localStoredSource, localSource);
     }
-
-    /*
-     * Prepare worker directory.
-     */
-    await mkdir(
-      workDir,
-      {
-        recursive: true,
-      },
-    );
 
     /*
      * FFmpeg processing.
@@ -293,9 +224,7 @@ export async function runOneJob(
      * processVideo() now returns:
      *
      * - thumbnailPath
-     * - previewPath
-     * - renditions
-     * - masterPlaylistPath
+     * - no playback transcode
      */
     const output =
       await processVideo(
@@ -348,73 +277,7 @@ export async function runOneJob(
       `[worker] thumbnail uploaded content=${job.contentId} key=${thumbnailKey}`,
     );
 
-    /*
-     * -------------------------------------------------
-     * 2. HOVER PREVIEW
-     * -------------------------------------------------
-     *
-     * This was previously missing.
-     *
-     * processor.ts generates:
-     *
-     * workDir/preview.webp
-     *
-     * Now we actually upload it.
-     */
-    if (output.previewPath) {
-      await store.putFile(
-        storagePaths.preview(
-          job.contentId,
-        ),
-        output.previewPath,
-        PREVIEW_CONTENT_TYPE,
-      );
-
-      console.info(
-        `[worker] preview uploaded content=${job.contentId}`,
-      );
-    } else {
-      /*
-       * Preview generation is optional.
-       * The actual video can still become READY.
-       */
-      console.warn(
-        `[worker] preview unavailable content=${job.contentId}`,
-      );
-    }
-
-    /*
-     * -------------------------------------------------
-     * 3. ORIGINAL-QUALITY HLS
-     * -------------------------------------------------
-     */
-    for (
-      const rendition of output.renditions
-    ) {
-      await uploadRendition(
-        store,
-        job.contentId,
-        rendition.label,
-        rendition.localDir,
-      );
-    }
-
-    /*
-     * -------------------------------------------------
-     * 4. MASTER PLAYLIST
-     * -------------------------------------------------
-     *
-     * Master is uploaded last.
-     */
-    await store.putBuffer(
-      storagePaths.hlsMaster(
-        job.contentId,
-      ),
-      await readFile(
-        output.masterPlaylistPath,
-      ),
-      PLAYLIST_CONTENT_TYPE,
-    );
+    /* Original file is the playback asset; no HLS/preview generation. */
 
     /*
      * -------------------------------------------------
@@ -425,81 +288,22 @@ export async function runOneJob(
      * succeed do we mark the video READY.
      */
     await db.$transaction([
-      db.videoRendition.deleteMany({
-        where: {
-          contentId:
-            job.contentId,
-        },
-      }),
-
-      db.videoRendition.createMany({
-        data:
-          output.renditions.map(
-            (rendition) => ({
-              contentId:
-                job.contentId,
-
-              label:
-                rendition.label,
-
-              width:
-                rendition.width,
-
-              height:
-                rendition.height,
-
-              bitrateKbps:
-                rendition.bitrateKbps,
-
-              playlistKey:
-                rendition.playlistKey,
-
-              sizeBytes:
-                rendition.sizeBytes,
-            }),
-          ),
-      }),
-
+      db.videoRendition.deleteMany({ where: { contentId: job.contentId } }),
       db.content.update({
-        where: {
-          id: job.contentId,
-        },
-
+        where: { id: job.contentId },
         data: {
-          thumbnailId:
-            thumbnailAsset.id,
-
-          processingStatus:
-            "READY",
-
-          processingCompletedAt:
-            new Date(),
-
-          processingError:
-            null,
-
-          hlsMasterKey:
-            storagePaths.hlsMaster(
-              job.contentId,
-            ),
-
-          durationSeconds:
-            output.media
-              .durationSeconds,
+          thumbnailId: thumbnailAsset.id,
+          processingStatus: "READY",
+          processingCompletedAt: new Date(),
+          processingError: null,
+          hlsMasterKey: null,
+          durationSeconds: output.media.durationSeconds,
         },
       }),
     ]);
 
-    /*
-     * Job completed.
-     */
-    await markJobSucceeded(
-      job.id,
-    );
-
-    console.info(
-      `[worker] processing completed content=${job.contentId} renditions=${output.renditions.length} preview=${Boolean(output.previewPath)} thumbnail=true`,
-    );
+    await markJobSucceeded(job.id);
+    console.info(`[worker] processing completed content=${job.contentId} thumbnail=true original-playback=true`);
 
     return "succeeded";
   } catch (error) {

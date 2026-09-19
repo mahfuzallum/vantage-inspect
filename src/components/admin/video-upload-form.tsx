@@ -402,6 +402,52 @@ export function VideoUploadForm({
       .replace(/=+$/g, "");
   }
 
+  async function uploadWithRetry(
+    itemId: string,
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body: Blob,
+    onProgress: (loaded: number) => void,
+    maxRetries = 3,
+  ): Promise<string | null> {
+    let lastError: Error | null = null;
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      try {
+        return await new Promise<string | null>((resolve, reject) => {
+          const request = new XMLHttpRequest();
+          requestRefs.current.set(itemId, request);
+          request.upload.addEventListener("progress", (event) => {
+            if (event.lengthComputable) onProgress(event.loaded);
+          });
+          request.addEventListener("load", () => {
+            requestRefs.current.delete(itemId);
+            if (request.status >= 200 && request.status < 300) resolve(request.getResponseHeader("ETag"));
+            else reject(new Error(`Storage upload failed (${request.status}).`));
+          });
+          request.addEventListener("error", () => {
+            requestRefs.current.delete(itemId);
+            reject(new Error("The connection dropped before the upload finished."));
+          });
+          request.addEventListener("abort", () => {
+            requestRefs.current.delete(itemId);
+            reject(new Error("Upload cancelled."));
+          });
+          request.open(method || "PUT", url);
+          for (const [name, value] of Object.entries(headers)) request.setRequestHeader(name, value);
+          request.send(body);
+        });
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error("Upload failed.");
+        if (attempt >= maxRetries) throw lastError;
+        const retryNumber = attempt + 1;
+        setFiles((previous) => previous.map((entry) => entry.id === itemId ? { ...entry, message: `Network interrupted. Retrying... ${retryNumber}/${maxRetries}` } : entry));
+        await new Promise((resolve) => setTimeout(resolve, Math.min(5000, 750 * 2 ** attempt)));
+      }
+    }
+    throw lastError ?? new Error("Upload failed.");
+  }
+
   async function uploadOne(
     item: UploadItem,
     mode: UploadMode,
@@ -409,6 +455,8 @@ export function VideoUploadForm({
     if (!creator) {
       return Promise.resolve();
     }
+
+    let activeMultipart: { contentId: string; objectKey: string; uploadId: string } | null = null;
 
     setFiles((previous) =>
       previous.map((entry) =>
@@ -545,6 +593,10 @@ export function VideoUploadForm({
         );
       }
 
+      if (uploadType === "multipart" && "uploadId" in authorization) {
+        activeMultipart = { contentId, objectKey, uploadId: authorization.uploadId };
+      }
+
       if (uploadType === "multipart") {
         if (
           !("uploadId" in authorization) ||
@@ -591,134 +643,20 @@ export function VideoUploadForm({
             end,
           );
 
-          const etag =
-            await new Promise<string>(
-              (resolve, reject) => {
-                const request =
-                  new XMLHttpRequest();
+          const etag = await uploadWithRetry(
+            item.id,
+            part.url,
+            part.method || "PUT",
+            part.headers ?? {},
+            partBlob,
+            (loaded) => {
+              const progress = Math.min(95, Math.round(((uploadedBytes + loaded) / item.file.size) * 95));
+              setFiles((previous) => previous.map((entry) => entry.id === item.id ? { ...entry, progress } : entry));
+            },
+          );
 
-                requestRefs.current.set(
-                  item.id,
-                  request,
-                );
-
-                request.upload.addEventListener(
-                  "progress",
-                  (event) => {
-                    if (
-                      !event.lengthComputable
-                    ) {
-                      return;
-                    }
-
-                    const progress = Math.min(
-                      95,
-                      Math.round(
-                        ((uploadedBytes +
-                          event.loaded) /
-                          item.file.size) *
-                          95,
-                      ),
-                    );
-
-                    setFiles((previous) =>
-                      previous.map(
-                        (entry) =>
-                          entry.id === item.id
-                            ? {
-                                ...entry,
-                                progress,
-                              }
-                            : entry,
-                      ),
-                    );
-                  },
-                );
-
-                request.addEventListener(
-                  "load",
-                  () => {
-                    requestRefs.current.delete(
-                      item.id,
-                    );
-
-                    if (
-                      request.status >= 200 &&
-                      request.status < 300
-                    ) {
-                      const responseEtag =
-                        request.getResponseHeader(
-                          "ETag",
-                        );
-
-                      if (!responseEtag) {
-                        reject(
-                          new Error(
-                            `Multipart part ${part.partNumber} uploaded but no ETag was returned.`,
-                          ),
-                        );
-                        return;
-                      }
-
-                      resolve(responseEtag);
-                    } else {
-                      reject(
-                        new Error(
-                          `Storage part ${part.partNumber} upload failed (${request.status}).`,
-                        ),
-                      );
-                    }
-                  },
-                );
-
-                request.addEventListener(
-                  "error",
-                  () => {
-                    requestRefs.current.delete(
-                      item.id,
-                    );
-                    reject(
-                      new Error(
-                        "The connection dropped before the file part finished.",
-                      ),
-                    );
-                  },
-                );
-
-                request.addEventListener(
-                  "abort",
-                  () => {
-                    requestRefs.current.delete(
-                      item.id,
-                    );
-                    reject(
-                      new Error(
-                        "Upload cancelled.",
-                      ),
-                    );
-                  },
-                );
-
-                request.open(
-                  part.method || "PUT",
-                  part.url,
-                );
-
-                for (const [
-                  name,
-                  value,
-                ] of Object.entries(
-                  part.headers ?? {},
-                )) {
-                  request.setRequestHeader(
-                    name,
-                    value,
-                  );
-                }
-
-                request.send(partBlob);
-              },
-            );
+          // ETag may be hidden by storage CORS. The completion endpoint can
+          // recover the authoritative part list server-side in that case.
 
           uploadedBytes +=
             partBlob.size;
@@ -741,10 +679,12 @@ export function VideoUploadForm({
             ),
           );
 
-          completedParts.push({
-            partNumber: part.partNumber,
-            etag,
-          });
+          if (etag) {
+            completedParts.push({
+              partNumber: part.partNumber,
+              etag,
+            });
+          }
         }
 
         const completeResponse = await fetch(
@@ -759,7 +699,11 @@ export function VideoUploadForm({
               objectKey,
               uploadId:
                 authorization.uploadId,
-              parts: completedParts,
+              parts:
+                completedParts.length ===
+                authorization.parts.length
+                  ? completedParts
+                  : [],
             }),
           },
         );
@@ -793,112 +737,15 @@ export function VideoUploadForm({
           );
         }
 
-        await new Promise<void>(
-          (resolve, reject) => {
-            const request =
-              new XMLHttpRequest();
-
-            requestRefs.current.set(
-              item.id,
-              request,
-            );
-
-            request.upload.addEventListener(
-              "progress",
-              (event) => {
-                if (!event.lengthComputable)
-                  return;
-
-                const progress = Math.min(
-                  95,
-                  Math.round(
-                    (event.loaded /
-                      event.total) *
-                      95,
-                  ),
-                );
-
-                setFiles((previous) =>
-                  previous.map((entry) =>
-                    entry.id === item.id
-                      ? {
-                          ...entry,
-                          progress,
-                        }
-                      : entry,
-                  ),
-                );
-              },
-            );
-
-            request.addEventListener(
-              "load",
-              () => {
-                requestRefs.current.delete(
-                  item.id,
-                );
-
-                if (
-                  request.status >= 200 &&
-                  request.status < 300
-                ) {
-                  resolve();
-                } else {
-                  reject(
-                    new Error(
-                      `Storage upload failed (${request.status}).`,
-                    ),
-                  );
-                }
-              },
-            );
-
-            request.addEventListener(
-              "error",
-              () => {
-                requestRefs.current.delete(
-                  item.id,
-                );
-                reject(
-                  new Error(
-                    "The connection dropped before the file finished.",
-                  ),
-                );
-              },
-            );
-
-            request.addEventListener(
-              "abort",
-              () => {
-                requestRefs.current.delete(
-                  item.id,
-                );
-                reject(
-                  new Error(
-                    "Upload cancelled.",
-                  ),
-                );
-              },
-            );
-
-            request.open(
-              authorization.method || "PUT",
-              authorization.url,
-            );
-
-            for (const [
-              name,
-              value,
-            ] of Object.entries(
-              authorization.headers ?? {},
-            )) {
-              request.setRequestHeader(
-                name,
-                value,
-              );
-            }
-
-            request.send(item.file);
+        await uploadWithRetry(
+          item.id,
+          authorization.url,
+          authorization.method || "PUT",
+          authorization.headers ?? {},
+          item.file,
+          (loaded) => {
+            const progress = Math.min(95, Math.round((loaded / item.file.size) * 95));
+            setFiles((previous) => previous.map((entry) => entry.id === item.id ? { ...entry, progress } : entry));
           },
         );
       }
@@ -963,6 +810,17 @@ export function VideoUploadForm({
       );
     } catch (error) {
       requestRefs.current.delete(item.id);
+
+      // Best-effort cleanup of an incomplete multipart upload.
+      // If the network itself is down, storage lifecycle rules should also
+      // expire abandoned multipart uploads.
+      if (activeMultipart) {
+        await fetch("/api/admin/videos/upload/abort", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(activeMultipart),
+        }).catch(() => undefined);
+      }
 
       setFiles((previous) =>
         previous.map((entry) =>

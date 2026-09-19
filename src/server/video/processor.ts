@@ -71,7 +71,7 @@ export type ProcessingOutput = {
    */
   previewPath: string | null;
 
-  masterPlaylistPath: string;
+  masterPlaylistPath: string | null;
 
   renditions: RenditionResult[];
 };
@@ -645,100 +645,16 @@ export async function writeMasterPlaylist(
 export async function processVideo(
   sourcePath: string,
   workDir: string,
-  videoId: string,
+  _videoId: string,
 ): Promise<ProcessingOutput> {
-  await mkdir(
-    workDir,
-    {
-      recursive: true,
-    },
-  );
+  await mkdir(workDir, { recursive: true });
+  const media = await probe(sourcePath);
+  const validation = validateProbed(media);
+  if (!validation.ok) throw new FfmpegError(validation.reason, validation.reason);
 
-  /*
-   * 1. Probe original video.
-   */
-  const media =
-    await probe(
-      sourcePath,
-    );
-
-  const validation =
-    validateProbed(
-      media,
-    );
-
-  if (!validation.ok) {
-    throw new FfmpegError(
-      validation.reason,
-      validation.reason,
-    );
-  }
-
-  /*
-   * 2. Generate thumbnail.
-   *
-   * This automatically tries multiple frames
-   * when the beginning of the video is delayed.
-   */
-  const thumbnailPath =
-    await generateThumbnail(
-      sourcePath,
-      workDir,
-      media.durationSeconds,
-    );
-
-  /*
-   * 3. Generate animated hover preview.
-   *
-   * IMPORTANT:
-   *
-   * This was missing before.
-   *
-   * generatePreview() existed but was never
-   * called by processVideo().
-   */
-  const previewPath =
-    await generatePreview(
-      sourcePath,
-      workDir,
-      media.durationSeconds,
-    );
-
-  /*
-   * 4. Generate browser-compatible HLS rendition.
-   *
-   * The original video is re-encoded to
-   * H.264/AAC for reliable browser playback.
-   */
-  const renditions: RenditionResult[] = [
-    await generateRendition(
-      sourcePath,
-      workDir,
-      videoId,
-      media,
-    ),
-  ];
-
-  /*
-   * 5. Write master playlist.
-   */
-  const masterPlaylistPath =
-    await writeMasterPlaylist(
-      workDir,
-      renditions,
-    );
-
-  return {
-    media,
-
-    thumbnailPath,
-
-    previewPath,
-
-    masterPlaylistPath,
-
-    renditions,
-  };
+  // Original-file playback: processing creates only a lightweight thumbnail.
+  const thumbnailPath = await generateThumbnail(sourcePath, workDir, media.durationSeconds);
+  return { media, thumbnailPath, previewPath: null, masterPlaylistPath: null, renditions: [] };
 }
 
 /**

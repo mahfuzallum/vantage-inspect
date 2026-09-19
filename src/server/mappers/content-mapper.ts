@@ -1,8 +1,6 @@
 import "server-only";
 import type { Category, Content, Creator, MediaAsset, Tag } from "@prisma/client";
 import { resolveAssetUrl } from "@/lib/media";
-import { publicMediaUrl } from "@/lib/media/hls";
-import { storagePaths } from "@/lib/media/paths";
 import { safeExternalUrl } from "@/lib/security/sanitize";
 import type {
   CategorySummary,
@@ -102,10 +100,10 @@ export async function toContentCard(row: ContentCardRow): Promise<ContentCardMod
     summary: row.summary,
     kind: row.kind,
     durationSeconds: row.durationSeconds,
-    thumbnailUrl:
-      (await resolveAssetUrl(row.thumbnail)) ??
-      publicMediaUrl(storagePaths.thumbnail(row.id)),
-    previewUrl: await resolveAssetUrl(row.source),
+    thumbnailUrl: await resolveAssetUrl(row.thumbnail),
+    // Listing cards must never resolve the original video.
+    // The source URL is created only on the detail page after a user opens it.
+    previewUrl: null,
     viewCount: row.viewCount,
     favoriteCount: row.favoriteCount,
     likeCount: row.likeCount,
@@ -141,7 +139,7 @@ export async function toContentDetail(
   const mediaUrl = (await resolveAssetUrl(row.source)) ?? safeExternalUrl(row.externalUrl);
 
   const playback = playbackStateFor(row);
-  const hlsUrl = publicMediaUrl(row.hlsMasterKey);
+  const hlsUrl = null;
 
   // What playback would be if the record were published. Used only to decide
   // whether a preview has anything to show.
