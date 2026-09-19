@@ -296,25 +296,13 @@ function toProviderConfig(
 export async function getConfiguredMediaProvider(): Promise<
   MediaStorageProvider
 > {
-  const profile =
-    await getActiveStorageProfile();
+  const env = serverEnv();
 
-  if (!profile) {
-    return serverEnv()
-      .MEDIA_PROVIDER === "s3"
-      ? new S3MediaProvider()
-      : new LocalMediaProvider();
+  if (env.MEDIA_PROVIDER === "s3") {
+    return new S3MediaProvider();
   }
 
-  if (profile.type === "local") {
-    return new LocalMediaProvider();
-  }
-
-  return new S3MediaProvider(
-    toProviderConfig(
-      profile as StoredProfile,
-    ),
-  );
+  return new LocalMediaProvider();
 }
 
 /**
