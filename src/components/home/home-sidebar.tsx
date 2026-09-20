@@ -1,8 +1,18 @@
 import Link from "next/link";
-import { Compass, Flame, Heart, Search, Star } from "lucide-react";
+import {
+  Compass,
+  Flame,
+  Heart,
+  Search,
+  Send,
+  Star,
+} from "lucide-react";
 import { Avatar } from "@/components/ui/avatar";
 import { routes } from "@/config/routes";
-import { formatCount, formatRelativeTime } from "@/lib/utils/format";
+import {
+  formatCount,
+  formatRelativeTime,
+} from "@/lib/utils/format";
 import { cn } from "@/lib/utils/cn";
 import type { CreatorSummary } from "@/types/content";
 
@@ -102,6 +112,12 @@ export function HomeSidebar({
             href={routes.account.favorites}
             icon={Heart}
             label="Saved"
+          />
+
+          <RailLink
+            href={routes.requestModel}
+            icon={Send}
+            label="Request Model"
           />
         </nav>
 
