@@ -164,6 +164,15 @@ export function MediaPlayer({
   const [isPictureInPicture, setIsPictureInPicture] =
     useState(false);
 
+  // Browser-only capability checks must not affect the initial server/client
+  // render. Keeping this false during hydration prevents a JSX mismatch.
+  const [isMounted, setIsMounted] =
+    useState(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   const [showControls, setShowControls] =
     useState(true);
 
@@ -2478,8 +2487,7 @@ export function MediaPlayer({
 
               {/* Picture-in-Picture */}
               {!isAudio &&
-              typeof document !==
-                "undefined" &&
+              isMounted &&
               "pictureInPictureEnabled" in
                 document ? (
                 <button

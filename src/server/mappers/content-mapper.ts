@@ -1,7 +1,17 @@
 import "server-only";
-import type { Category, Content, Creator, MediaAsset, Tag } from "@prisma/client";
+
+import type {
+  Category,
+  Content,
+  Creator,
+  MediaAsset,
+  Tag,
+} from "@prisma/client";
+
 import { resolveAssetUrl } from "@/lib/media";
+import { publicMediaUrl } from "@/lib/media/hls";
 import { safeExternalUrl } from "@/lib/security/sanitize";
+
 import type {
   CategorySummary,
   ContentCardModel,
@@ -14,14 +24,22 @@ import type {
 export const contentCardInclude = {
   thumbnail: true,
   source: true,
-  creator: { include: { avatar: true } },
+  creator: {
+    include: {
+      avatar: true,
+    },
+  },
   category: true,
 } as const;
 
 export const contentDetailInclude = {
   ...contentCardInclude,
   source: true,
-  tags: { include: { tag: true } },
+  tags: {
+    include: {
+      tag: true,
+    },
+  },
 } as const;
 
 /**
@@ -39,7 +57,9 @@ export function playbackStateFor(row: {
   externalUrl?: string | null;
   sourceId?: string | null;
 }): "playable" | "processing" | "unavailable" {
-  if (row.status !== "PUBLISHED") return "unavailable";
+  if (row.status !== "PUBLISHED") {
+    return "unavailable";
+  }
 
   if (
     row.processingStatus === "PROCESSING" ||
@@ -48,18 +68,37 @@ export function playbackStateFor(row: {
   ) {
     return "processing";
   }
-  if (row.processingStatus === "FAILED") return "unavailable";
 
-  // Either a completed transcode, or an external/direct source predating the
-  // pipeline — both are legitimately playable.
-  if (row.hlsMasterKey || row.externalUrl || row.sourceId) return "playable";
+  if (row.processingStatus === "FAILED") {
+    return "unavailable";
+  }
+
+  /*
+   * A finished HLS transcode is the preferred playback path.
+   * External URLs and older direct-source records remain supported.
+   */
+  if (
+    row.hlsMasterKey ||
+    row.externalUrl ||
+    row.sourceId
+  ) {
+    return "playable";
+  }
+
   return "unavailable";
 }
 
-type CreatorRow = Creator & { avatar: MediaAsset | null };
+type CreatorRow = Creator & {
+  avatar: MediaAsset | null;
+};
 
-export async function toCreatorSummary(row: CreatorRow | null): Promise<CreatorSummary | null> {
-  if (!row) return null;
+export async function toCreatorSummary(
+  row: CreatorRow | null,
+): Promise<CreatorSummary | null> {
+  if (!row) {
+    return null;
+  }
+
   return {
     id: row.id,
     slug: row.slug,
@@ -70,8 +109,13 @@ export async function toCreatorSummary(row: CreatorRow | null): Promise<CreatorS
   };
 }
 
-export function toCategorySummary(row: Category | null): CategorySummary | null {
-  if (!row) return null;
+export function toCategorySummary(
+  row: Category | null,
+): CategorySummary | null {
+  if (!row) {
+    return null;
+  }
+
   return {
     id: row.id,
     slug: row.slug,
@@ -82,7 +126,12 @@ export function toCategorySummary(row: Category | null): CategorySummary | null 
 }
 
 export function toTagSummary(row: Tag): TagSummary {
-  return { id: row.id, slug: row.slug, name: row.name, contentCount: row.contentCount };
+  return {
+    id: row.id,
+    slug: row.slug,
+    name: row.name,
+    contentCount: row.contentCount,
+  };
 }
 
 type ContentCardRow = Content & {
@@ -92,7 +141,9 @@ type ContentCardRow = Content & {
   category: Category | null;
 };
 
-export async function toContentCard(row: ContentCardRow): Promise<ContentCardModel> {
+export async function toContentCard(
+  row: ContentCardRow,
+): Promise<ContentCardModel> {
   return {
     id: row.id,
     slug: row.slug,
@@ -101,27 +152,38 @@ export async function toContentCard(row: ContentCardRow): Promise<ContentCardMod
     kind: row.kind,
     durationSeconds: row.durationSeconds,
     thumbnailUrl: await resolveAssetUrl(row.thumbnail),
-    // Listing cards must never resolve the original video.
-    // The source URL is created only on the detail page after a user opens it.
+
+    /*
+     * Listing cards must never resolve the original video.
+     * The source URL is created only on the detail page.
+     */
     previewUrl: null,
+
     viewCount: row.viewCount,
     favoriteCount: row.favoriteCount,
     likeCount: row.likeCount,
     dislikeCount: row.dislikeCount,
     publishedAt: row.publishedAt,
     isFeatured: row.isFeatured,
+
     creator: await toCreatorSummary(row.creator),
     category: toCategorySummary(row.category),
   };
 }
 
-export function toContentCards(rows: ContentCardRow[]): Promise<ContentCardModel[]> {
-  return Promise.all(rows.map(toContentCard));
+export function toContentCards(
+  rows: ContentCardRow[],
+): Promise<ContentCardModel[]> {
+  return Promise.all(
+    rows.map(toContentCard),
+  );
 }
 
 type ContentDetailRow = ContentCardRow & {
   source: MediaAsset | null;
-  tags: Array<{ tag: Tag }>;
+  tags: Array<{
+    tag: Tag;
+  }>;
 };
 
 export async function toContentDetail(
@@ -135,15 +197,44 @@ export async function toContentDetail(
   allowUnpublishedPlayback = false,
 ): Promise<ContentDetailModel> {
   const card = await toContentCard(row);
-  // Stored media wins; externalUrl is the fallback for third-party hosts.
-  const mediaUrl = (await resolveAssetUrl(row.source)) ?? safeExternalUrl(row.externalUrl);
+
+  /*
+   * Original/direct media URL.
+   *
+   * This remains available as a fallback for formats the browser can play
+   * natively, such as compatible MP4 files.
+   */
+  const mediaUrl =
+    (await resolveAssetUrl(row.source)) ??
+    safeExternalUrl(row.externalUrl);
+
+  /*
+   * HLS playback URL.
+   *
+   * The worker stores the generated HLS master playlist key in
+   * Content.hlsMasterKey. publicMediaUrl() converts that storage key into
+   * the application's /media/... route.
+   *
+   * IMPORTANT:
+   * hlsMasterKey is still null for records that have not been reprocessed
+   * with the HLS-enabled worker.
+   */
+  const hlsUrl = publicMediaUrl(
+    row.hlsMasterKey,
+  );
 
   const playback = playbackStateFor(row);
-  const hlsUrl = null;
 
-  // What playback would be if the record were published. Used only to decide
-  // whether a preview has anything to show.
-  const hasSource = Boolean(row.hlsMasterKey || row.externalUrl || row.sourceId);
+  /*
+   * What playback would be if the record were published. Used only to decide
+   * whether a preview has anything to show.
+   */
+  const hasSource = Boolean(
+    row.hlsMasterKey ||
+      row.externalUrl ||
+      row.sourceId,
+  );
+
   const previewable =
     allowUnpublishedPlayback &&
     hasSource &&
@@ -152,17 +243,46 @@ export async function toContentDetail(
     row.processingStatus !== "UPLOADING" &&
     row.processingStatus !== "FAILED";
 
+  const canPlay =
+    playback === "playable" ||
+    previewable;
+
   return {
     ...card,
-    playback: previewable && playback !== "playable" ? "playable" : playback,
-    // Never handed out unless the recording is genuinely playable.
-    hlsUrl: playback === "playable" || previewable ? hlsUrl : null,
+
+    playback:
+      previewable &&
+      playback !== "playable"
+        ? "playable"
+        : playback,
+
+    /*
+     * HLS is handed to MediaPlayer only when the record is actually allowed
+     * to play. When hlsMasterKey is absent this is null, so the existing
+     * original-source fallback continues to work for compatible media.
+     */
+    hlsUrl: canPlay
+      ? hlsUrl
+      : null,
+
     description: row.description,
     status: row.status,
     language: row.language,
     recordedAt: row.recordedAt,
-    mediaUrl: playback === "playable" || previewable ? mediaUrl : null,
-    tags: row.tags.map((link: { tag: Tag }) => toTagSummary(link.tag)),
+
+    /*
+     * Original source remains available as a fallback.
+     * The original R2 file is never replaced by the HLS derivative.
+     */
+    mediaUrl: canPlay
+      ? mediaUrl
+      : null,
+
+    tags: row.tags.map(
+      (link: { tag: Tag }) =>
+        toTagSummary(link.tag),
+    ),
+
     seoTitle: row.seoTitle,
     seoDescription: row.seoDescription,
     ogImageUrl: row.ogImageUrl,

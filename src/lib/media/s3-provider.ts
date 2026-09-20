@@ -308,8 +308,18 @@ export class S3MediaProvider implements MediaStorageProvider {
   /**
    * Resolves a browser-accessible URL.
    *
-   * Public objects use the configured public URL.
-   * Private objects use a short-lived signed GET.
+   * Always use a short-lived signed GET.
+   *
+   * The configured STORAGE_PUBLIC_URL is not used for playback because
+   * the current R2/public endpoint returns 403 for these media objects.
+   *
+   * Signed URLs keep the bucket private while allowing the application
+   * media route to retrieve MP4/HLS manifests and segments reliably.
+   *
+   * This is especially important for HLS: the browser requests the
+   * application /media/* route for the master playlist and each segment,
+   * while this provider retrieves each object from R2 with server-side
+   * authorization.
    */
   async resolveUrl(
     object: StoredObject,
@@ -317,22 +327,6 @@ export class S3MediaProvider implements MediaStorageProvider {
   ): Promise<string> {
     if (!object.objectKey) {
       return "";
-    }
-
-    const env = serverEnv();
-
-    const publicUrl =
-      this.config?.publicUrl ??
-      env.STORAGE_PUBLIC_URL;
-
-    if (
-      isPublicKey(object.objectKey) &&
-      publicUrl
-    ) {
-      return `${publicUrl.replace(
-        /\/$/,
-        "",
-      )}/${object.objectKey}`;
     }
 
     return getSignedUrl(
@@ -603,13 +597,29 @@ export class S3MediaProvider implements MediaStorageProvider {
           UploadId: params.uploadId,
         }),
       );
+
       suppliedParts = (listed.Parts ?? [])
-        .filter((part) => Number.isInteger(part.PartNumber) && Boolean(part.ETag))
-        .map((part) => ({ partNumber: part.PartNumber as number, etag: part.ETag as string }));
+        .filter(
+          (part) =>
+            Number.isInteger(
+              part.PartNumber,
+            ) &&
+            Boolean(part.ETag),
+        )
+        .map(
+          (part) => ({
+            partNumber:
+              part.PartNumber as number,
+            etag:
+              part.ETag as string,
+          }),
+        );
     }
 
     if (!suppliedParts.length) {
-      throw new Error("Multipart upload has no completed parts.");
+      throw new Error(
+        "Multipart upload has no completed parts.",
+      );
     }
 
     const sortedParts =

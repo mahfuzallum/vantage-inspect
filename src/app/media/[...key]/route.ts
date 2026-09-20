@@ -264,8 +264,9 @@ async function serveS3Media(
 
   const object: StoredObject = {
     provider: "S3",
-    bucket:
-      env.STORAGE_BUCKET ?? null,
+    // Use the active provider's configured bucket.
+    // This keeps DB-configured S3/R2 profiles and .env from disagreeing.
+    bucket: null,
     objectKey,
     url: null,
     mimeType:
@@ -470,8 +471,11 @@ export async function GET(
      * /media/videos/hls/.../720p/playlist.m3u8
      * /media/videos/hls/.../720p/segment.ts
      */
+    const configuredProvider =
+      await getConfiguredMediaProvider();
+
     if (
-      env.MEDIA_PROVIDER === "s3"
+      configuredProvider.id === "S3"
     ) {
       return serveS3Media(
         request,
@@ -754,8 +758,11 @@ export async function HEAD(
     const env =
       serverEnv();
 
+    const configuredProvider =
+      await getConfiguredMediaProvider();
+
     if (
-      env.MEDIA_PROVIDER === "s3"
+      configuredProvider.id === "S3"
     ) {
       return serveS3Media(
         request,
