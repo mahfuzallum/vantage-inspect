@@ -3,6 +3,7 @@ import localFont from "next/font/local";
 import { rootMetadata } from "@/lib/seo/metadata";
 import { jsonLdScript, websiteJsonLd } from "@/lib/seo/structured-data";
 import { AuthProvider } from "./providers";
+import AgeGate from "@/components/age-gate";
 import "./globals.css";
 
 /**
@@ -21,7 +22,10 @@ import "./globals.css";
 const display = localFont({
   src: [
     { path: "./fonts/space-grotesk-latin-wght-normal.woff2", style: "normal" },
-    { path: "./fonts/space-grotesk-latin-ext-wght-normal.woff2", style: "normal" },
+    {
+      path: "./fonts/space-grotesk-latin-ext-wght-normal.woff2",
+      style: "normal",
+    },
   ],
   variable: "--font-space-grotesk",
   display: "swap",
@@ -44,8 +48,14 @@ const body = localFont({
 
 const mono = localFont({
   src: [
-    { path: "./fonts/jetbrains-mono-latin-wght-normal.woff2", style: "normal" },
-    { path: "./fonts/jetbrains-mono-latin-ext-wght-normal.woff2", style: "normal" },
+    {
+      path: "./fonts/jetbrains-mono-latin-wght-normal.woff2",
+      style: "normal",
+    },
+    {
+      path: "./fonts/jetbrains-mono-latin-ext-wght-normal.woff2",
+      style: "normal",
+    },
   ],
   variable: "--font-jetbrains-mono",
   display: "swap",
@@ -62,15 +72,24 @@ export const viewport = {
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${display.variable} ${body.variable} ${mono.variable}`}>
+    <html
+      lang="en"
+      className={`${display.variable} ${body.variable} ${mono.variable}`}
+    >
       <body className="min-h-dvh antialiased">
+        <AgeGate />
+
         <a href="#main" className="skip-link">
           Skip to content
         </a>
+
         <AuthProvider>{children}</AuthProvider>
+
         <script
           type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: jsonLdScript(websiteJsonLd()) }}
+          dangerouslySetInnerHTML={{
+            __html: jsonLdScript(websiteJsonLd()),
+          }}
         />
       </body>
     </html>
