@@ -259,9 +259,6 @@ async function serveS3Media(
   const provider =
     await getConfiguredMediaProvider();
 
-  const env =
-    serverEnv();
-
   const object: StoredObject = {
     provider: "S3",
     // Use the active provider's configured bucket.
@@ -754,9 +751,6 @@ export async function HEAD(
         },
       );
     }
-
-    const env =
-      serverEnv();
 
     const configuredProvider =
       await getConfiguredMediaProvider();
