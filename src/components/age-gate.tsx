@@ -72,7 +72,6 @@ export default function AgeGate() {
       {/* Content */}
       <div className="relative flex min-h-screen items-center justify-center px-5 py-8">
         <div className="flex w-full max-w-[760px] flex-col items-center text-center">
-
           {/* Vantage logo */}
           <div className="mb-6 flex h-11 w-11 items-center justify-center rounded-[13px] border border-violet-300/20 bg-gradient-to-br from-violet-500/20 to-fuchsia-500/10 shadow-[0_0_45px_rgba(139,92,246,0.16)]">
             <div className="flex h-6 w-6 items-center justify-center rounded-[7px] border border-white/50">
@@ -85,8 +84,8 @@ export default function AgeGate() {
           {/* Description */}
           <p className="max-w-[690px] text-[11px] leading-5 text-white/35 sm:text-[13px]">
             Millions of archive videos of cam models around the world on
-            Archivebate - the home to the world's best webcam archive videos
-            platform.
+            Archivebate - the home to the world&apos;s best webcam archive
+            videos platform.
           </p>
 
           {/* RTA + 18+ */}
@@ -126,8 +125,8 @@ export default function AgeGate() {
 
           {/* Warning text */}
           <p className="mt-4 text-[11px] font-semibold leading-5 text-white/80 sm:text-[13px]">
-            The sites contains sexually explicit material, enter only if you
-            are over 18
+           This website contains mature material. Please continue only
+            if you are 18 years of age or older.
           </p>
 
           {/* Small Vantage footer */}
